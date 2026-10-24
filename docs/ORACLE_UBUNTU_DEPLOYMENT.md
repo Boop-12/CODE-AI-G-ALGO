@@ -149,7 +149,7 @@ openssl rand -hex 48
 nano .env
 ```
 
-Set POSTGRES_PASSWORD to the first random value and SECRET_KEY to the second. Keep ENVIRONMENT=production, COOKIE_SECURE=true, ALLOWED_ORIGINS=https://gnkalgo.com,https://www.gnkalgo.com, TLS_DIR=/opt/gnkalgo/tls. Do not print .env in logs. Hex passwords avoid connection-URL escaping issues. Changing POSTGRES_PASSWORD later does not change the existing database password; rotate both in a coordinated operation.
+Set POSTGRES_USER and POSTGRES_DB to the role and database used when the PostgreSQL volume was initialized. For a new volume, keep the template defaults (`postgres`); for an existing volume, inspect its configured role and database rather than assuming the defaults. Set POSTGRES_PASSWORD to the matching database password and SECRET_KEY to the second random value. Keep ENVIRONMENT=production, COOKIE_SECURE=true, ALLOWED_ORIGINS=https://gnkalgo.com,https://www.gnkalgo.com, TLS_DIR=/opt/gnkalgo/tls. Do not print .env in logs. Hex passwords avoid connection-URL escaping issues. Changing POSTGRES_USER, POSTGRES_DB, or POSTGRES_PASSWORD does not alter an existing database cluster; coordinate any credential or database changes with a verified backup.
 
 ## 7. Configure Cloudflare DNS and origin TLS
 
@@ -179,7 +179,7 @@ docker compose -f docker-compose.yml -f docker-compose.production.yml ps
 docker compose -f docker-compose.yml -f docker-compose.production.yml logs --tail=100 api web nginx
 ```
 
-The script validates configuration, builds, waits for PostgreSQL, runs migrations, starts healthy services, validates Nginx and verifies local origin TLS using the Cloudflare CA. It does not claim public DNS success. On the first install the database must be empty; review DATABASE_DESIGN.md before migrating any pre-existing database.
+The script validates configuration, builds, waits for PostgreSQL, runs migrations, starts healthy services, validates Nginx and verifies local origin TLS using the Cloudflare CA at `tls/cloudflare-origin-ca.pem` (or `ORIGIN_CA_FILE`). The Compose configuration and backup script use POSTGRES_USER and POSTGRES_DB so they can target an existing initialized volume. Before the first migration on any pre-existing database, create and validate a backup, inspect its schema and migration version, and review DATABASE_DESIGN.md. The script does not claim public DNS success.
 
 Create an administrator interactively (no default credentials):
 
