@@ -1,0 +1,42 @@
+name: Deploy Oracle Ubuntu
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+  actions: read
+concurrency:
+  group: gnkalgo-production
+  cancel-in-progress: false
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - name: Deploy this exact workflow commit after its CI succeeds
+        env:
+          SSH_PRIVATE_KEY: ${{ secrets.ORACLE_SSH_PRIVATE_KEY }}
+          SSH_KNOWN_HOSTS: ${{ secrets.ORACLE_SSH_KNOWN_HOSTS }}
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          COMMIT: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          conclusion=$(gh api "repos/$REPOSITORY/actions/workflows/python-app.yml/runs?head_sha=$COMMIT&status=completed" --jq '.workflow_runs | map(select(.event == "push")) | first | .conclusion')
+          test "$conclusion" = success
+          test -n "$SSH_PRIVATE_KEY"
+          test -n "$SSH_KNOWN_HOSTS"
+          install -m 700 -d "$RUNNER_TEMP/gnk-ssh"
+          printf '%s\n' "$SSH_PRIVATE_KEY" > "$RUNNER_TEMP/gnk-ssh/key"
+          printf '%s\n' "$SSH_KNOWN_HOSTS" > "$RUNNER_TEMP/gnk-ssh/known_hosts"
+          chmod 600 "$RUNNER_TEMP/gnk-ssh/key"
+          ssh -i "$RUNNER_TEMP/gnk-ssh/key" -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$RUNNER_TEMP/gnk-ssh/known_hosts" ubuntu@130.210.34.12 bash -s -- "$COMMIT" <<'REMOTE'
+          set -euo pipefail
+          revision="$1"
+          cd /opt/gnkalgo/app
+          test -z "$(git status --porcelain)"
+          bash deploy/backup.sh
+          git fetch origin main
+          git cat-file -e "$revision^{commit}"
+          git checkout --detach "$revision"
+          bash deploy/deploy.sh
+          REMOTE
