@@ -1,8 +1,14 @@
 import asyncio
+import base64
+import hashlib
+import hmac
 import os
+import struct
+import time
 import uuid
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
+from urllib.parse import urlparse, parse_qs
 import httpx
 
 os.environ["DATABASE_URL"] = os.getenv("GNK_TEST_DATABASE_URL", "sqlite+aiosqlite:///./test-platform.db")
@@ -16,6 +22,7 @@ from sqlalchemy import select
 from app.main import app
 from app.db.session import engine, Base, AsyncSessionLocal
 from app.models import User, Role, Session, AuditLog, Position
+from app.core.security import hash_token
 
 
 @pytest.fixture(autouse=True)
@@ -44,6 +51,14 @@ def register(client, email="trader@example.com"):
 
 def submit(client, symbol="RELIANCE", quantity=10, side="BUY", key=None):
     return client.post("/api/v1/orders", json={"symbol": symbol, "quantity": quantity, "side": side}, headers={"Idempotency-Key": key or str(uuid.uuid4())})
+
+
+def totp_code(secret):
+    key = base64.b32decode(secret + "=" * (-len(secret) % 8))
+    digest = hmac.new(key, struct.pack(">Q", int(time.time() // 30)), hashlib.sha1).digest()
+    offset = digest[-1] & 0x0F
+    code = (struct.unpack(">I", digest[offset:offset + 4])[0] & 0x7FFFFFFF) % 1_000_000
+    return f"{code:06d}"
 
 
 def test_authentication_logout_and_revocation(client):
@@ -201,9 +216,100 @@ def test_admin_authorization(client):
             u.roles.append(Role(name="admin"))
             await db.commit()
     asyncio.run(promote())
+    assert client.get("/api/v1/admin/overview").status_code == 403
+    secret = client.post("/api/v1/auth/mfa/setup", json={}).json()["secret"]
+    assert client.post("/api/v1/auth/mfa/verify", json={"code": totp_code(secret)}).status_code == 200
     result = client.get("/api/v1/admin/overview")
     assert result.status_code == 200
     assert result.json()["users"][0]["email"] == user["email"]
+    assert client.get("/api/v1/admin/users").json()["total"] == 1
+    assert client.get("/api/v1/admin/roles").status_code == 200
+    assert client.get("/api/v1/admin/audit-logs").status_code == 200
+    assert client.patch("/api/v1/admin/settings", json={"settings": {"registration_enabled": "false"}}).status_code == 403
+
+
+def test_super_admin_can_manage_roles_and_suspend_accounts(client):
+    admin = register(client, "super-admin@example.com")
+    other = TestClient(app, headers={"Origin": "http://testserver"})
+    register(other, "managed-user@example.com")
+
+    async def promote():
+        async with AsyncSessionLocal() as db:
+            from sqlalchemy.orm import selectinload
+            user = (await db.execute(select(User).options(selectinload(User.roles)).where(User.id == uuid.UUID(admin["id"])))).scalar_one()
+            user.roles.append(Role(name="super_admin"))
+            await db.commit()
+    asyncio.run(promote())
+
+    secret = client.post("/api/v1/auth/mfa/setup", json={}).json()["secret"]
+    assert client.post("/api/v1/auth/mfa/verify", json={"code": totp_code(secret)}).status_code == 200
+    listing = client.get("/api/v1/admin/users?q=managed-user&page=1&page_size=1").json()
+    assert listing["total"] == 1
+    target_id = listing["items"][0]["id"]
+    role_result = client.patch(f"/api/v1/admin/users/{target_id}/roles", json={"roles": ["admin"]})
+    assert role_result.status_code == 200 and role_result.json()["roles"] == ["admin"]
+    suspended = client.patch(f"/api/v1/admin/users/{target_id}/status", json={"is_active": False})
+    assert suspended.status_code == 200 and suspended.json()["is_active"] is False
+    assert other.get("/api/v1/me").status_code == 401
+    other.close()
+
+
+def test_email_verification_profile_settings_and_password_reset(client):
+    registered = client.post("/api/v1/auth/register", json={
+        "name": "Test Trader",
+        "email": "verified@example.com",
+        "password": "A-long-test-password-123",
+    })
+    assert registered.status_code == 201
+    verify_url = registered.json()["development_verification_url"]
+    verify_token = parse_qs(urlparse(verify_url).query)["token"][0]
+    assert client.get("/api/v1/profile").json()["email_verified"] is False
+    assert client.post("/api/v1/auth/verify-email", json={"token": verify_token}).json()["status"] == "email_verified"
+    assert client.get("/api/v1/profile").json()["email_verified"] is True
+    assert client.post("/api/v1/auth/verify-email", json={"token": verify_token}).status_code == 400
+
+    profile = client.patch("/api/v1/profile", json={"name": "Updated Trader"})
+    assert profile.status_code == 200 and profile.json()["name"] == "Updated Trader"
+    assert client.patch("/api/v1/settings/account", json={"theme": "dark"}).json()["theme"] == "dark"
+    assert client.get("/api/v1/settings/account").json()["theme"] == "dark"
+    security = client.get("/api/v1/settings/security").json()
+    assert len(security["sessions"]) == 1 and security["sessions"][0]["current"] is True
+
+    reset = client.post("/api/v1/auth/forgot-password", json={"email": "verified@example.com"})
+    reset_url = reset.json()["development_url"]
+    reset_token = parse_qs(urlparse(reset_url).query)["token"][0]
+    async def stored_hash():
+        from app.models import PasswordResetToken
+        async with AsyncSessionLocal() as db:
+            record = (await db.execute(select(PasswordResetToken))).scalar_one()
+            assert record.token == hash_token(reset_token)
+    asyncio.run(stored_hash())
+    assert client.post("/api/v1/auth/reset-password", json={"token": reset_token, "new_password": "A-new-test-password-456"}).status_code == 200
+    assert client.get("/api/v1/me").status_code == 401
+    assert client.post("/api/v1/auth/reset-password", json={"token": reset_token, "new_password": "A-new-test-password-456"}).status_code == 400
+    assert client.post("/api/v1/auth/login", json={"email": "verified@example.com", "password": "A-new-test-password-456"}).status_code == 200
+
+
+def test_admin_mfa_login_code_is_required(client):
+    user = register(client, "mfa-admin@example.com")
+    async def promote():
+        async with AsyncSessionLocal() as db:
+            from sqlalchemy.orm import selectinload
+            account_user = (await db.execute(select(User).options(selectinload(User.roles)).where(User.id == uuid.UUID(user["id"])))).scalar_one()
+            account_user.roles.append(Role(name="admin"))
+            await db.commit()
+    asyncio.run(promote())
+    secret = client.post("/api/v1/auth/mfa/setup", json={}).json()["secret"]
+    assert client.post("/api/v1/auth/mfa/verify", json={"code": totp_code(secret)}).status_code == 200
+    client.post("/api/v1/auth/logout")
+    credentials = {"email": "mfa-admin@example.com", "password": "A-long-test-password-123"}
+    assert client.post("/api/v1/auth/login", json=credentials).status_code == 401
+    assert client.post("/api/v1/auth/login", json={**credentials, "mfa_code": "000000"}).status_code == 401
+    assert client.post("/api/v1/auth/login", json={**credentials, "mfa_code": totp_code(secret)}).status_code == 200
+    assert client.post("/api/v1/auth/mfa/setup", json={}).status_code == 409
+    assert client.post("/api/v1/auth/mfa/disable", json={"code": "000000"}).status_code == 400
+    assert client.post("/api/v1/auth/mfa/disable", json={"code": totp_code(secret)}).status_code == 200
+    assert client.get("/api/v1/admin/overview").status_code == 403
 
 
 @pytest.mark.skipif(not os.environ["DATABASE_URL"].startswith("postgresql"), reason="Requires PostgreSQL row locks")

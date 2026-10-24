@@ -14,14 +14,15 @@ Inspected on 24 October 2026. Starting folder was not a Git checkout. Existing N
 - [x] Profile and simulation consent onboarding, with identity verification explicitly absent.
 - [x] Docker configuration, health checks, TLS origin configuration, CI and manual deployment workflow.
 - [x] Local-to-GitHub-to-Oracle-to-Cloudflare runbook and backup/rollback instructions.
-- [ ] Email/mobile verification, password recovery, MFA, session management UI and abuse protection beyond proxy limits.
+- [x] Email verification, password recovery, admin MFA, session management, login history and authentication rate limits at the Nginx edge.
 - [ ] KYC provider, encrypted private document storage, review workflow and retention controls.
 - [ ] Live broker adapters, token encryption/refresh, licensed market feed, streaming and reconciliation.
 - [ ] Automated strategy signals, stop-loss engine, backtests, strategy versioning and worker scheduling.
 - [ ] Partial fills/rejections, dedicated execution ledger and event history, fees/slippage and portfolio snapshots.
 - [ ] Paid plan entitlements, payment gateway/webhook verification, invoices and renewals.
 - [ ] Research publishing/upload/download permissions and full admin user/role/support management.
-- [ ] Production security review, operational alerting, off-server backups and tested disaster recovery.
+- [x] Full admin user search/pagination, account activation/suspension, role assignment, audit review and persisted registration settings.
+- [ ] SMTP provider setup, production security review, operational alerting, off-server backups and tested disaster recovery.
 - [x] GitHub CI: 16 PostgreSQL tests including concurrency, migration cycle, frontend checks and Docker startup/API smoke checks.
 - [ ] Full automated browser end-to-end tests, live Oracle deployment and public DNS/TLS checks.
 

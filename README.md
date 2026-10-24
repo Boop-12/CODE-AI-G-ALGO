@@ -14,13 +14,17 @@ docker compose up --build -d --wait
 
 Open http://localhost . Register with your own email and a 12+ character password. Account creation grants INR 1,000,000 of virtual capital, not real funds. Create an order, then use Orders -> Simulate fill to update positions. Pending orders reserve virtual cash or holdings. The application cannot execute live orders.
 
+Authentication routes include `/login`, `/register`, `/forgot-password`, `/reset-password`, and `/verify-email`. Account settings are at `/profile`, `/settings/account`, `/settings/security`, and `/settings/brokers`; the separate admin portal starts at `/admin/login`. Configure SMTP in `.env` to deliver verification and recovery email. Without SMTP, development and test environments return a one-time development link in the API response; production does not return action tokens. Administrator APIs require an `admin` or `super_admin` role and a verified TOTP authenticator. Create the first administrator with `python -m app.bootstrap`, sign in at `/admin/login`, and complete MFA setup before using admin tools.
+
 For native Windows development, migration commands, GitHub setup, Oracle Ubuntu deployment, Cloudflare DNS/TLS, backups and rollback, follow **[the step-by-step deployment guide](docs/ORACLE_UBUNTU_DEPLOYMENT.md)**.
 
 ## Included
 
 - Supplied GNK branding; responsive light/dark workspace, market watch and searchable demonstration quotes.
-- Registration/login/logout; PBKDF2 password hashes, opaque hashed database sessions, HttpOnly cookies, expiry and Origin checks.
-- Per-user paper accounts/orders/positions/audit trails; admin authorization and interactive bootstrap.
+- Registration/login/logout; PBKDF2 password hashes, opaque hashed database sessions, HttpOnly cookies, expiry, Origin checks, email verification, password recovery and rate-limited auth endpoints.
+- Profile/preferences, session revocation, successful-login history, encrypted TOTP MFA setup and separate role-protected admin portal.
+- Searchable/paginated user administration, account activation/suspension, super-admin role management, audit logs and persistent registration/support settings.
+- Per-user paper accounts/orders/positions/audit trails; interactive administrator bootstrap.
 - Strategy configuration states/allocation caps; mock broker connection controls.
 - Replay-safe order submission/fills, pending-order reservations, exposure/quantity/realized daily loss checks, and pause-all switch.
 - Profile/consent onboarding, original educational articles, a free paper plan and stored support requests.
@@ -28,7 +32,7 @@ For native Windows development, migration commands, GitHub setup, Oracle Ubuntu 
 
 ## Release boundaries
 
-This is not a finished commercial/live trading product. Prices are fixed demonstration data. Strategy activation saves configuration; it does not start automated orders. KYC identity verification, email verification/recovery/MFA, real brokers/feeds, payments, publishing, advanced administration, historical analytics and production monitoring remain pending. See [implementation status](docs/IMPLEMENTATION_CHECKLIST.md) and [validation evidence](docs/VALIDATION.md).
+This is not a finished commercial/live trading product. Prices are fixed demonstration data. Strategy activation saves configuration; it does not start automated orders. KYC identity verification, real brokers/feeds, payments, publishing, historical analytics and production monitoring remain pending. SMTP delivery, secure production secrets, database migrations and deployment hardening must be configured for production. See [implementation status](docs/IMPLEMENTATION_CHECKLIST.md) and [validation evidence](docs/VALIDATION.md).
 
 ## Checks
 
