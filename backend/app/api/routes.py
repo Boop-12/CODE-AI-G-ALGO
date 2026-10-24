@@ -12,9 +12,10 @@ from sqlalchemy.orm import selectinload
 from app.api.deps import get_admin, get_current_user, locked_account
 from app.brokers import QUOTES, STRATEGIES, broker
 from app.core.config import settings
-from app.core.security import get_password_hash, verify_password, hash_token
+from app.core.security import get_password_hash, verify_password, hash_token, decrypt_mfa_secret, verify_totp
+from app.core.mailer import action_url, deliver_link
 from app.db.session import get_db
-from app.models import User, Account, Session, Deployment, Order, Position, AuditLog, SupportTicket
+from app.models import User, Account, Session, Deployment, Order, Position, AuditLog, SupportTicket, EmailVerificationToken, LoginHistory, SystemSetting
 
 router = APIRouter()
 MAX_EXPOSURE = Decimal("500000")
@@ -27,7 +28,7 @@ def row(obj, fields):
     return {key: getattr(obj, key) for key in fields.split()}
 
 def user_view(user):
-    return {"id": str(user.id), "name": user.name, "email": user.email, "roles": [r.name for r in user.roles]}
+    return {"id": str(user.id), "name": user.name, "email": user.email, "roles": [r.name for r in user.roles], "email_verified": user.email_verified, "theme": user.theme, "mfa_enabled": user.mfa_enabled}
 
 class Register(BaseModel):
     name: str = Field(min_length=2, max_length=80, pattern=r"\S")
@@ -37,34 +38,62 @@ class Register(BaseModel):
 class Login(BaseModel):
     email: EmailStr
     password: str = Field(min_length=1, max_length=128)
+    mfa_code: str | None = Field(default=None, pattern=r"^\d{6}$")
 
-async def start_session(db, response, user_id):
+async def start_session(db, response, user_id, request):
     token = secrets.token_urlsafe(48)
-    db.add(Session(token_hash=hash_token(token), user_id=user_id, expires_at=datetime.now(timezone.utc) + timedelta(minutes=settings.SESSION_MINUTES)))
+    db.add(Session(
+        token_hash=hash_token(token),
+        user_id=user_id,
+        expires_at=datetime.now(timezone.utc) + timedelta(minutes=settings.SESSION_MINUTES),
+        ip_address=request.client.host if request.client else None,
+        user_agent=request.headers.get("user-agent", "")[:512] or None,
+    ))
     response.set_cookie("gnk_session", token, httponly=True, secure=settings.COOKIE_SECURE, samesite="strict", max_age=settings.SESSION_MINUTES * 60, path="/api")
 
 @router.post("/auth/register", status_code=201)
-async def register(body: Register, response: Response, db: AsyncSession = Depends(get_db)):
-    user = User(name=body.name.strip(), email=str(body.email).lower(), hashed_password=get_password_hash(body.password))
+async def register(body: Register, request: Request, response: Response, db: AsyncSession = Depends(get_db)):
+    registration = await db.get(SystemSetting, "registration_enabled")
+    if registration and registration.value == "false":
+        raise HTTPException(403, "New account registration is currently disabled")
+    user = User(name=body.name.strip(), email=str(body.email).lower(), hashed_password=get_password_hash(body.password), email_verified=False)
     db.add(user)
     try:
         await db.flush()
         db.add(Account(user_id=user.id))
-        await start_session(db, response, user.id)
+        await start_session(db, response, user.id, request)
         audit(db, user.id, "account.created", "INR 1,000,000 virtual capital")
+        verification_token = secrets.token_urlsafe(32)
+        db.add(EmailVerificationToken(
+            user_id=user.id,
+            token_hash=hash_token(verification_token),
+            expires_at=datetime.now(timezone.utc) + timedelta(hours=24),
+        ))
+        verification_url = action_url("verify-email", verification_token)
+        delivered = await deliver_link(user.email, "Verify your GnkAlgo Trader email", f"Verify your email: {verification_url}")
         await db.commit()
     except IntegrityError:
         await db.rollback()
         raise HTTPException(409, "Unable to register this email")
-    return {"id": str(user.id), "name": user.name, "email": user.email, "roles": []}
+    result = {"id": str(user.id), "name": user.name, "email": user.email, "roles": [], "email_verified": False, "theme": user.theme, "mfa_enabled": False, "verification_sent": delivered}
+    if not delivered and settings.ENVIRONMENT != "production":
+        result["development_verification_url"] = verification_url
+    return result
 
 @router.post("/auth/login")
-async def login(body: Login, response: Response, db: AsyncSession = Depends(get_db)):
+async def login(body: Login, request: Request, response: Response, db: AsyncSession = Depends(get_db)):
     user = (await db.execute(select(User).options(selectinload(User.roles)).where(User.email == str(body.email).lower()))).scalar_one_or_none()
     valid = verify_password(body.password, user.hashed_password) if user else bool(get_password_hash(body.password)) and False
+    if valid and user and user.mfa_enabled:
+        valid = bool(body.mfa_code and user.mfa_secret and verify_totp(decrypt_mfa_secret(user.mfa_secret), body.mfa_code))
     if not user or not valid or not user.is_active:
         raise HTTPException(401, "Email or password is incorrect")
-    await start_session(db, response, user.id)
+    await start_session(db, response, user.id, request)
+    db.add(LoginHistory(
+        user_id=user.id,
+        ip_address=request.client.host if request.client else None,
+        user_agent=request.headers.get("user-agent", "")[:512] or None,
+    ))
     audit(db, user.id, "session.created")
     await db.commit()
     return user_view(user)
@@ -313,8 +342,8 @@ async def create_ticket(body: Ticket, user: User = Depends(get_current_user), db
 
 @router.get("/admin/overview")
 async def admin_overview(admin: User = Depends(get_admin), db: AsyncSession = Depends(get_db)):
-    users = list((await db.execute(select(User).order_by(User.created_at.desc()).limit(100))).scalars())
+    users = list((await db.execute(select(User).options(selectinload(User.roles)).order_by(User.created_at.desc()).limit(100))).scalars())
     logs = list((await db.execute(select(AuditLog).order_by(AuditLog.created_at.desc()).limit(100))).scalars())
     audit(db, admin.id, "admin.overview_read")
     await db.commit()
-    return {"users": [row(u, "id name email is_active created_at") for u in users], "audit": [row(e, "id user_id action detail created_at") for e in logs]}
+    return {"users": [{**row(u, "id name email is_active email_verified mfa_enabled created_at"), "roles": [r.name for r in u.roles]} for u in users], "audit": [row(e, "id user_id action detail created_at") for e in logs]}

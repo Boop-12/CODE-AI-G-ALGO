@@ -19,6 +19,13 @@ async def get_current_user(request: Request, db: AsyncSession = Depends(get_db))
 async def get_admin(user: User = Depends(get_current_user)) -> User:
     if not any(r.name in ("admin", "super_admin") for r in user.roles):
         raise HTTPException(403, "Administrator access required")
+    if not user.mfa_enabled or not user.mfa_secret:
+        raise HTTPException(403, "Set up multi-factor authentication before using administrator tools")
+    return user
+
+async def get_super_admin(user: User = Depends(get_admin)) -> User:
+    if not any(r.name == "super_admin" for r in user.roles):
+        raise HTTPException(403, "Super administrator access required")
     return user
 
 async def locked_account(db: AsyncSession, user: User) -> Account:

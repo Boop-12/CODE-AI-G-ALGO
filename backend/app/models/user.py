@@ -1,5 +1,5 @@
 import uuid
-from sqlalchemy import Column, String, Boolean, DateTime, ForeignKey, Table
+from sqlalchemy import Column, String, Boolean, DateTime, ForeignKey, Table, false
 from sqlalchemy import Uuid as UUID
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
@@ -20,6 +20,10 @@ class User(Base):
     name = Column(String, nullable=False)
     hashed_password = Column(String, nullable=False)
     is_active = Column(Boolean, default=True)
+    email_verified = Column(Boolean, default=False, server_default=false(), nullable=False)
+    theme = Column(String(12), default="system", server_default="system", nullable=False)
+    mfa_secret = Column(String(512), nullable=True)
+    mfa_enabled = Column(Boolean, default=False, server_default=false(), nullable=False)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
     roles = relationship("Role", secondary=user_role_table, back_populates="users")

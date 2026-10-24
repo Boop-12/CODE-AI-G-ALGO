@@ -1,13 +1,13 @@
-# Validation evidence - 24 October 2026
+# Validation evidence - 25 October 2026
 
 ## Passed locally
 
-- Backend: 14 integration tests passed; 2 PostgreSQL-specific concurrency tests skipped on SQLite. A Starlette warning recommends httpx2 for future TestClient compatibility; the current httpx adapter completed the tests successfully.
+- Backend: 17 integration tests passed; 2 PostgreSQL-specific concurrency tests skipped on SQLite. Coverage includes email verification, hashed password-reset tokens/session revocation, profile preferences, session listing, MFA enforcement at the admin boundary, and admin pagination/roles in addition to the existing paper trading flows.
 - Covered: login/logout/revocation/expiry, password/session hashing, admin access, per-user ownership, order idempotency, explicit fills, positions/cash accounting, pending buy/sell reservations, quantity/exposure limits, UTC daily realized loss cap, strategy transitions/allocation, broker disconnection, kill switch, Origin checks, profile consent, support persistence and payment unavailability.
-- Frontend: npm run lint, npm run typecheck and npm run build succeeded. Production build uses Next.js's supported Webpack builder. Turbopack crashed on this Windows host, including outside the sandbox; no Turbopack success is claimed.
-- Migration: isolated SQLite database upgraded from empty, alembic check reported no schema drift, downgraded to base and upgraded again. Generic SQLAlchemy UUID types corrected SQLite portability. PostgreSQL migration verification remains for CI.
+- Frontend: npm run lint, npm run typecheck and npm run build succeeded on Next.js 16.4.3. Production dependency audit reports no advisories; the patched development dependency tree also reports zero vulnerabilities. Production build uses Next.js's supported Webpack builder. Turbopack crashed on this Windows host, including outside the sandbox; no Turbopack success is claimed.
+- Migration: the account-security migration upgraded, downgraded and upgraded again on an isolated SQLite database. PostgreSQL migration verification remains for CI.
 - Both local and production Docker Compose configurations passed docker compose config --quiet. Workflow and Compose YAML parsed successfully. Ubuntu deployment scripts passed bash -n syntax checks.
-- Browser: mobile and desktop layouts visually inspected. Synthetic local registration completed. Paper BUY submission displayed pending; explicit Simulate fill displayed filled; positions showed one RELIANCE at INR 2,952.40; cash decreased to INR 997,047.60 and equity remained INR 1,000,000 at the fixed quote. Screenshot: screenshots/paper-workspace.png. Synthetic records are in an ignored local database only.
+- Browser: the dedicated registration page was exercised against local SQLite-backed services; registration returned its development verification link with no console errors. The registration page rendered at 390px with no horizontal overflow. The full account/admin flow was not browser-automated. Existing synthetic paper trading evidence remains in the prior screenshot and ignored local database.
 - Git exclusions checked for .env, private keys, virtual environments, node_modules, .next and runtime databases.
 
 ## Passed in GitHub CI
