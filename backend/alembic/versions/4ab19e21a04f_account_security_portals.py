@@ -17,7 +17,7 @@ def upgrade() -> None:
     op.add_column("user", sa.Column("theme", sa.String(length=12), nullable=False, server_default="system"))
     op.add_column("user", sa.Column("mfa_secret", sa.String(length=512), nullable=True))
     op.add_column("user", sa.Column("mfa_enabled", sa.Boolean(), nullable=False, server_default=sa.false()))
-    op.execute(sa.text("UPDATE user SET email_verified = true"))
+    op.execute(sa.text('UPDATE "user" SET email_verified = true'))
     op.add_column("browser_session", sa.Column("created_at", sa.DateTime(timezone=True), nullable=True))
     op.add_column("browser_session", sa.Column("ip_address", sa.String(length=64), nullable=True))
     op.add_column("browser_session", sa.Column("user_agent", sa.String(length=512), nullable=True))
