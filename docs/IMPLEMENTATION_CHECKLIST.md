@@ -22,6 +22,7 @@ Inspected on 24 October 2026. Starting folder was not a Git checkout. Existing N
 - [ ] Paid plan entitlements, payment gateway/webhook verification, invoices and renewals.
 - [ ] Research publishing/upload/download permissions and full admin user/role/support management.
 - [ ] Production security review, operational alerting, off-server backups and tested disaster recovery.
-- [ ] Verified PostgreSQL concurrency tests, full browser end-to-end tests, live Oracle deployment and public DNS/TLS checks.
+- [x] GitHub CI: 16 PostgreSQL tests including concurrency, migration cycle, frontend checks and Docker startup/API smoke checks.
+- [ ] Full automated browser end-to-end tests, live Oracle deployment and public DNS/TLS checks.
 
 This is a functional paper-trading MVP, not a finished regulated live-trading product. No live execution route exists. Fixed quotes mean actual market performance cannot be inferred. Strategy activation records configuration and does not start automated trades. Paper sessions intentionally allow practice outside market hours. Daily loss resets at UTC midnight in this MVP.

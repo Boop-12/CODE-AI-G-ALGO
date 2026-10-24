@@ -10,11 +10,18 @@
 - Browser: mobile and desktop layouts visually inspected. Synthetic local registration completed. Paper BUY submission displayed pending; explicit Simulate fill displayed filled; positions showed one RELIANCE at INR 2,952.40; cash decreased to INR 997,047.60 and equity remained INR 1,000,000 at the fixed quote. Screenshot: screenshots/paper-workspace.png. Synthetic records are in an ignored local database only.
 - Git exclusions checked for .env, private keys, virtual environments, node_modules, .next and runtime databases.
 
+## Passed in GitHub CI
+
+Run: https://github.com/Boop-12/CODE-AI-G-ALGO/actions/runs/40108071310 . Tested executable source commit: f7ba8cf2732b992a192ab7e2e0c81240012e4472.
+
+- Backend job succeeded against PostgreSQL 17: **16 tests passed**, including concurrent reservation and double-fill tests. Migration upgrade, schema-drift comparison, downgrade and re-upgrade all passed on PostgreSQL.
+- Frontend job succeeded: clean npm ci, lint, production build and typecheck.
+- Container job succeeded: backend/frontend Docker images built, Docker Compose reached healthy startup, and Nginx-to-API readiness request passed.
+- Docker Desktop was unavailable locally; container runtime verification was performed on the GitHub Ubuntu runner.
+
 ## Not verified
 
-- Docker image builds and container runtime: Docker Desktop Linux daemon was unavailable. Compose parsing does not establish working containers.
-- PostgreSQL row-lock/concurrency behavior and PostgreSQL migration cycle: two explicit concurrency tests and migration checks are configured in GitHub CI, not proven by SQLite.
-- CI/deployment workflows have not been observed completing successfully at the time this report was written.
+- The manual Oracle deployment workflow has not run. CI on a GitHub runner is not a live Oracle deployment.
 - Oracle SSH: server reachable on port 22, but available local key rejected with Permission denied (publickey). No server modifications made.
 - Public DNS, Cloudflare account/zone, origin certificate, OCI firewall, server sizing, public HTTPS and database restore drill remain unverified.
 - Full automated browser end-to-end coverage, accessibility audit, real market/broker integrations, payments, identity verification and live trading are not completed.
