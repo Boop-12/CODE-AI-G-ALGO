@@ -109,3 +109,40 @@ test("fragment recovery tokens and older verification links remain compatible", 
   const profile = await page.request.get("/api/v1/profile");
   expect((await profile.json()).email_verified).toBe(true);
 });
+
+test("mock broker connection, health, sync and disconnect stay server-side", async ({ page }) => {
+  const email = `mock-broker-${Date.now()}@example.com`;
+  await page.goto("/register");
+  await page.getByLabel("Full name").fill("Mock Broker Trader");
+  await page.getByLabel("Email address", { exact: true }).fill(email);
+  await page.locator('input[name="password"]').fill("Mock-broker-browser-password-123!");
+  await page.getByLabel("Confirm password", { exact: true }).fill("Mock-broker-browser-password-123!");
+  await page.getByRole("button", { name: "Create account", exact: true }).click();
+  await expect(page.getByRole("status")).toContainText("Your account is ready");
+
+  await page.goto("/settings/brokers");
+  await expect(page.getByRole("heading", { name: "Broker connections" }).first()).toBeVisible();
+  await expect(page.getByText("Zerodha", { exact: true })).toBeVisible();
+  await expect(page.getByText("Not implemented · No credentials collected").first()).toBeVisible();
+  await page.getByRole("button", { name: "Disconnect", exact: true }).click();
+  await expect(page.getByText("Mock broker disconnected.")).toBeVisible();
+  await page.getByRole("button", { name: "Connect mock broker", exact: true }).click();
+  await expect(page.getByText("Mock paper broker connected.")).toBeVisible();
+  await expect(page.getByText("Status: connected")).toBeVisible();
+
+  await page.getByRole("button", { name: "Check health", exact: true }).click();
+  await expect(page.getByText("Mock broker health: connected.")).toBeVisible();
+  await page.getByRole("button", { name: "Sync paper data", exact: true }).click();
+  await expect(page.getByRole("heading", { name: "Last mock synchronization" })).toBeVisible();
+  await expect(page.getByText("INR 1000000").first()).toBeVisible();
+
+  const exposedSecrets = await page.evaluate(() => {
+    const values = [...Object.values(localStorage), ...Object.values(sessionStorage)].join(" ");
+    return /access[_-]?token|secret|mock-broker-token/i.test(values);
+  });
+  expect(exposedSecrets).toBe(false);
+  await page.getByRole("button", { name: "Disconnect", exact: true }).click();
+  await expect(page.getByText("Mock broker disconnected.")).toBeVisible();
+  const status = await page.request.get("/api/v1/settings/brokers");
+  expect((await status.json()).connections[0].status).toBe("disconnected");
+});

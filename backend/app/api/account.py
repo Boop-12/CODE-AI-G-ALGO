@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.api.deps import get_admin, get_current_user, get_super_admin
+from app.brokers import mock_broker
 from app.core.config import settings
 from app.core.mailer import action_url, deliver_link
 from app.core.security import (
@@ -25,6 +26,8 @@ from app.core.security import (
 from app.db.session import get_db
 from app.models import (
     AuditLog,
+    Account,
+    BrokerConnection,
     EmailVerificationToken,
     LoginHistory,
     Role,
@@ -506,6 +509,39 @@ async def broker_settings(
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    from app.models import Account
     account = await db.get(Account, user.id)
-    return {"connections": [{"provider": "paper", "label": "GNK paper broker", "connected": account.broker_connected, "mode": "demo"}]}
+    connection = (await db.execute(select(BrokerConnection).where(
+        BrokerConnection.user_id == user.id, BrokerConnection.provider == "mock"
+    ))).scalar_one_or_none()
+    status = connection.status if connection else ("connected" if account.broker_connected else "disconnected")
+    expires_at = connection.credential_expires_at if connection else None
+    if status == "connected" and expires_at and _as_utc(expires_at) <= datetime.now(timezone.utc):
+        status = "expired"
+    return {
+        "providers": [
+            {"id": "mock", "name": "GNK Paper (mock)", "available": True, "capabilities": {
+                "exchanges": list(mock_broker.capabilities.exchanges),
+                "segments": list(mock_broker.capabilities.segments),
+                "account_summary": mock_broker.capabilities.account_summary,
+                "holdings": mock_broker.capabilities.holdings,
+                "positions": mock_broker.capabilities.positions,
+                "order_status": mock_broker.capabilities.order_status,
+                "order_placement": mock_broker.capabilities.order_placement,
+            }},
+            {"id": "zerodha", "name": "Zerodha", "available": False, "capabilities": None},
+            {"id": "dhan", "name": "Dhan", "available": False, "capabilities": None},
+            {"id": "fyers", "name": "FYERS", "available": False, "capabilities": None},
+        ],
+        "connections": [{
+            "provider": "mock",
+            "label": connection.account_label if connection else "GNK Mock Paper",
+            "connected": status == "connected" and account.broker_connected,
+            "status": status,
+            "mode": "paper",
+            "expires_at": expires_at,
+            "last_health_check_at": connection.last_health_check_at if connection else None,
+            "last_synced_at": connection.last_synced_at if connection else None,
+            "last_sync_status": connection.last_sync_status if connection else None,
+            "last_sync_error": connection.last_sync_error if connection else None,
+        }],
+    }

@@ -1,7 +1,8 @@
 import secrets
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, time as datetime_time, timedelta, timezone
 from decimal import Decimal
+from zoneinfo import ZoneInfo
 from typing import Literal
 from fastapi import APIRouter, Depends, Header, HTTPException, Request, Response
 from pydantic import BaseModel, EmailStr, Field
@@ -10,12 +11,24 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 from app.api.deps import get_admin, get_current_user, locked_account
-from app.brokers import QUOTES, STRATEGIES, broker
+from app.brokers import (
+    INSTRUMENTS,
+    INSTRUMENTS_BY_KEY,
+    QUOTES,
+    STRATEGIES,
+    BrokerAuthorizationError,
+    BrokerOrderStatus,
+    BrokerPosition,
+    BrokerRateLimitError,
+    bounded_broker_read,
+    broker,
+    mock_broker,
+)
 from app.core.config import settings
 from app.core.security import get_password_hash, verify_password, hash_token, decrypt_mfa_secret, verify_totp, password_needs_rehash
 from app.core.mailer import action_url, deliver_link
 from app.db.session import get_db
-from app.models import User, Account, Session, Deployment, Order, Position, AuditLog, SupportTicket, EmailVerificationToken, LoginHistory, SystemSetting
+from app.models import User, Account, BrokerConnection, Session, Deployment, Order, Position, AuditLog, SupportTicket, EmailVerificationToken, LoginHistory, SystemSetting
 
 router = APIRouter()
 MAX_EXPOSURE = Decimal("500000")
@@ -115,11 +128,42 @@ async def me(user: User = Depends(get_current_user)):
 
 @router.get("/market")
 async def market():
-    return {"source": "demonstration", "as_of": None, "quotes": [{"symbol": symbol, **q} for symbol, q in QUOTES.items()], "indices": [{"name": "NIFTY 50", "value": "24,834.60", "change": "+0.62%"}, {"name": "SENSEX", "value": "81,765.86", "change": "+0.58%"}, {"name": "BANK NIFTY", "value": "52,108.25", "change": "+0.91%"}]}
+    return {"source": "demonstration", "as_of": None, "currency": "INR", "quotes": [{"symbol": symbol, **q} for symbol, q in QUOTES.items()], "indices": [{"name": "NIFTY 50", "value": "24,834.60", "change": "+0.62%"}, {"name": "SENSEX", "value": "81,765.86", "change": "+0.58%"}, {"name": "BANK NIFTY", "value": "52,108.25", "change": "+0.91%"}]}
+
+@router.get("/instruments")
+async def instruments(exchange: Literal["NSE", "BSE"] | None = None):
+    items = INSTRUMENTS if exchange is None else tuple(i for i in INSTRUMENTS if i.exchange == exchange)
+    return [{
+        "exchange": item.exchange,
+        "exchange_instrument_id": item.exchange_instrument_id,
+        "symbol": item.symbol,
+        "name": item.name,
+        "asset_class": item.asset_class,
+        "currency": item.currency,
+        "price_precision": item.price_precision,
+        "quantity_precision": item.quantity_precision,
+        "price": item.quote,
+        "source": "fixed_mock_quote",
+    } for item in items]
+
+@router.get("/market/session")
+async def market_session():
+    now = datetime.now(ZoneInfo("Asia/Kolkata"))
+    opening = datetime_time(9, 15)
+    closing = datetime_time(15, 30)
+    regular_hours = now.weekday() < 5 and opening <= now.time().replace(tzinfo=None) < closing
+    return {
+        "exchange_timezone": "Asia/Kolkata",
+        "local_time": now.isoformat(),
+        "regular_session_hours": {"open": "09:15", "close": "15:30"},
+        "status": "regular_hours" if regular_hours else "closed",
+        "holiday_calendar_loaded": False,
+        "enforced_for_paper_orders": False,
+    }
 
 async def positions_for(db, user_id):
     positions = (await db.execute(select(Position).where(Position.user_id == user_id, Position.quantity > 0))).scalars().all()
-    return [{**row(p, "id symbol quantity average_price"), "ltp": broker.quote(p.symbol), "pnl": (broker.quote(p.symbol) - p.average_price) * p.quantity} for p in positions]
+    return [{**row(p, "id exchange symbol quantity average_price"), "ltp": broker.quote(p.symbol), "pnl": (broker.quote(p.symbol) - p.average_price) * p.quantity} for p in positions]
 
 @router.get("/dashboard")
 async def dashboard(user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
@@ -128,7 +172,7 @@ async def dashboard(user: User = Depends(get_current_user), db: AsyncSession = D
     deployments = (await db.execute(select(Deployment).where(Deployment.user_id == user.id))).scalars().all()
     orders = (await db.execute(select(Order).where(Order.user_id == user.id).order_by(Order.created_at.desc()).limit(8))).scalars().all()
     value = sum((p["ltp"] * p["quantity"] for p in positions), Decimal(0))
-    return {"mode": "paper", "market_source": "demonstration", "cash": account.cash, "equity": account.cash + value, "invested": value, "realized_pnl": account.realized_pnl, "unrealized_pnl": sum((p["pnl"] for p in positions), Decimal(0)), "killed": account.killed, "broker_connected": account.broker_connected, "kyc_status": account.kyc_status, "subscription": "Paper workspace Â· Free", "active_strategies": sum(d.state == "active" for d in deployments), "positions": positions, "recent_orders": [row(o, "id symbol side quantity price state created_at") for o in orders]}
+    return {"mode": "paper", "market_source": "demonstration", "cash": account.cash, "equity": account.cash + value, "invested": value, "realized_pnl": account.realized_pnl, "unrealized_pnl": sum((p["pnl"] for p in positions), Decimal(0)), "killed": account.killed, "broker_connected": account.broker_connected, "kyc_status": account.kyc_status, "subscription": "Paper workspace Â· Free", "active_strategies": sum(d.state == "active" for d in deployments), "positions": positions, "recent_orders": [row(o, "id exchange symbol side quantity price state created_at") for o in orders]}
 
 @router.get("/strategies")
 async def strategies(user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
@@ -164,6 +208,7 @@ async def strategy_change(strategy_id: str, body: StrategyChange, user: User = D
     return {"state": body.state, "allocation": body.allocation}
 
 class OrderRequest(BaseModel):
+    exchange: Literal["NSE", "BSE"] = "NSE"
     symbol: str = Field(max_length=30)
     side: Literal["BUY", "SELL"]
     quantity: int = Field(strict=True, gt=0, le=1000)
@@ -180,19 +225,19 @@ async def pending_orders(db, user_id):
     return list((await db.execute(select(Order).where(Order.user_id == user_id, Order.state == "pending"))).scalars())
 
 def order_view(o):
-    return row(o, "id symbol side quantity price state created_at filled_at")
+    return row(o, "id exchange symbol side quantity price state created_at filled_at")
 
 @router.post("/orders", status_code=201)
 async def create_order(body: OrderRequest, idempotency_key: str = Header(min_length=8, max_length=100), user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
     account = await locked_account(db, user)
     existing = (await db.execute(select(Order).where(Order.user_id == user.id, Order.idempotency_key == idempotency_key))).scalar_one_or_none()
     if existing:
-        if (existing.symbol, existing.side, existing.quantity) != (body.symbol, body.side, body.quantity):
+        if (existing.exchange, existing.symbol, existing.side, existing.quantity) != (body.exchange, body.symbol, body.side, body.quantity):
             raise HTTPException(409, "Idempotency key was used for a different order")
         return order_view(existing)
     await trading_allowed(db, user, account)
-    if body.symbol not in QUOTES:
-        raise HTTPException(422, "Choose a supported simulation symbol")
+    if (body.exchange, body.symbol) not in INSTRUMENTS_BY_KEY:
+        raise HTTPException(422, "Choose a supported NSE or BSE simulation instrument")
     price = broker.quote(body.symbol)
     pending = await pending_orders(db, user.id)
     positions = await positions_for(db, user.id)
@@ -203,13 +248,13 @@ async def create_order(body: OrderRequest, idempotency_key: str = Header(min_len
         if notional + reserved > account.cash or exposure + reserved + notional > MAX_EXPOSURE:
             raise HTTPException(422, "Insufficient unreserved capital or INR 500,000 exposure limit exceeded")
     else:
-        held = next((p["quantity"] for p in positions if p["symbol"] == body.symbol), 0)
-        reserved_qty = sum(o.quantity for o in pending if o.symbol == body.symbol and o.side == "SELL")
+        held = next((p["quantity"] for p in positions if p["exchange"] == body.exchange and p["symbol"] == body.symbol), 0)
+        reserved_qty = sum(o.quantity for o in pending if o.exchange == body.exchange and o.symbol == body.symbol and o.side == "SELL")
         if body.quantity + reserved_qty > held:
             raise HTTPException(422, "Insufficient unreserved holdings; short selling is disabled")
-    order = Order(user_id=user.id, idempotency_key=idempotency_key, symbol=body.symbol, side=body.side, quantity=body.quantity, price=price)
+    order = Order(user_id=user.id, idempotency_key=idempotency_key, exchange=body.exchange, symbol=body.symbol, side=body.side, quantity=body.quantity, price=price)
     db.add(order)
-    audit(db, user.id, "order.submitted", f"{body.side} {body.quantity} {body.symbol}")
+    audit(db, user.id, "order.submitted", f"{body.side} {body.quantity} {body.exchange}:{body.symbol}")
     await db.commit()
     return order_view(order)
 
@@ -224,9 +269,9 @@ async def fill_order(order_id: uuid.UUID, user: User = Depends(get_current_user)
     if order.state != "pending":
         raise HTTPException(409, "Only pending orders can fill")
     await trading_allowed(db, user, account)
-    position = (await db.execute(select(Position).where(Position.user_id == user.id, Position.symbol == order.symbol))).scalar_one_or_none()
+    position = (await db.execute(select(Position).where(Position.user_id == user.id, Position.exchange == order.exchange, Position.symbol == order.symbol))).scalar_one_or_none()
     if not position:
-        position = Position(user_id=user.id, symbol=order.symbol, quantity=0, average_price=Decimal(0))
+        position = Position(user_id=user.id, exchange=order.exchange, symbol=order.symbol, quantity=0, average_price=Decimal(0))
         db.add(position)
     amount = order.price * order.quantity
     if order.side == "BUY":
@@ -273,6 +318,235 @@ async def positions(user: User = Depends(get_current_user), db: AsyncSession = D
 class Switch(BaseModel):
     enabled: bool
 
+class BrokerConnect(BaseModel):
+    provider: Literal["mock"]
+
+
+def _utc(value: datetime) -> datetime:
+    return value.replace(tzinfo=timezone.utc) if value.tzinfo is None else value.astimezone(timezone.utc)
+
+
+async def _mock_connection(db: AsyncSession, user_id: uuid.UUID) -> BrokerConnection | None:
+    return (await db.execute(select(BrokerConnection).where(
+        BrokerConnection.user_id == user_id, BrokerConnection.provider == "mock"
+    ))).scalar_one_or_none()
+
+
+async def _connect_mock(db: AsyncSession, user: User, account: Account):
+    try:
+        expires_at = mock_broker.authorize()
+    except BrokerRateLimitError as error:
+        raise HTTPException(429, "Mock broker rate limit reached; retry shortly") from error
+    connection = await _mock_connection(db, user.id)
+    if connection is None:
+        connection = BrokerConnection(user_id=user.id, provider="mock")
+        db.add(connection)
+    connection.status = "connected"
+    connection.credential_expires_at = expires_at
+    connection.encrypted_access_token = None
+    connection.last_sync_error = None
+    account.broker_connected = True
+    audit(db, user.id, "broker.connected", "mock:NSE+BSE paper simulation")
+    await db.commit()
+    return {"provider": "mock", "status": "connected", "mode": "paper", "expires_at": expires_at}
+
+
+async def _disconnect_mock(db: AsyncSession, user: User, account: Account):
+    connection = await _mock_connection(db, user.id)
+    if connection and connection.status == "connected":
+        try:
+            mock_broker.disconnect()
+        except BrokerRateLimitError as error:
+            raise HTTPException(429, "Mock broker rate limit reached; retry shortly") from error
+    if connection:
+        connection.status = "disconnected"
+        connection.credential_expires_at = None
+        connection.encrypted_access_token = None
+        connection.last_sync_error = None
+    account.broker_connected = False
+    audit(db, user.id, "broker.disconnected", "mock")
+    await db.commit()
+    return {"provider": "mock", "status": "disconnected", "mode": "paper"}
+
+
+async def _require_mock_connection(db: AsyncSession, user: User) -> tuple[Account, BrokerConnection | None]:
+    account = await db.get(Account, user.id)
+    connection = await _mock_connection(db, user.id)
+    if not account.broker_connected or (connection and connection.status != "connected"):
+        raise HTTPException(409, "Connect the mock paper broker first")
+    if connection and connection.credential_expires_at and _utc(connection.credential_expires_at) <= datetime.now(timezone.utc):
+        connection.status = "expired"
+        connection.last_sync_status = "expired"
+        connection.last_sync_error = "authorization_expired"
+        account.broker_connected = False
+        audit(db, user.id, "broker.authorization_expired", "mock")
+        await db.commit()
+        raise HTTPException(409, "Mock broker authorization expired; reconnect to continue")
+    return account, connection
+
+
+async def _mock_snapshot(db: AsyncSession, user: User):
+    account, _ = await _require_mock_connection(db, user)
+    positions = (await db.execute(select(Position).where(
+        Position.user_id == user.id, Position.quantity > 0
+    ).order_by(Position.exchange, Position.symbol))).scalars().all()
+    orders = (await db.execute(select(Order).where(
+        Order.user_id == user.id
+    ).order_by(Order.created_at.desc()).limit(250))).scalars().all()
+    normalized_positions = [
+        BrokerPosition(
+            exchange=position.exchange,
+            exchange_instrument_id=INSTRUMENTS_BY_KEY[(position.exchange, position.symbol)].exchange_instrument_id,
+            symbol=position.symbol,
+            quantity=position.quantity,
+            average_price=Decimal(position.average_price),
+            last_price=broker.quote(position.symbol),
+            unrealized_pnl=(broker.quote(position.symbol) - Decimal(position.average_price)) * position.quantity,
+        )
+        for position in positions
+    ]
+    normalized_orders = [
+        BrokerOrderStatus(
+            order_id=str(order.id),
+            exchange=order.exchange,
+            exchange_instrument_id=INSTRUMENTS_BY_KEY[(order.exchange, order.symbol)].exchange_instrument_id,
+            symbol=order.symbol,
+            side=order.side,
+            quantity=order.quantity,
+            status=order.state,
+            updated_at=order.filled_at or order.created_at,
+        )
+        for order in orders
+    ]
+    summary = await bounded_broker_read(lambda: broker.account_summary(Decimal(account.cash), normalized_positions))
+    holdings = await bounded_broker_read(lambda: broker.holdings(normalized_positions))
+    current_positions = await bounded_broker_read(lambda: broker.positions(normalized_positions))
+    order_status = await bounded_broker_read(lambda: broker.order_status(normalized_orders))
+
+    def position_payload(item: BrokerPosition):
+        return {
+            "exchange": item.exchange,
+            "exchange_instrument_id": item.exchange_instrument_id,
+            "symbol": item.symbol,
+            "quantity": item.quantity,
+            "average_price": item.average_price,
+            "last_price": item.last_price,
+            "unrealized_pnl": item.unrealized_pnl,
+            "currency": "INR",
+        }
+
+    return {
+        "provider": "mock",
+        "mode": "paper",
+        "source": "paper_ledger_mirror",
+        "account": {"currency": summary.currency, "cash": summary.cash, "equity": summary.equity, "invested": summary.invested},
+        "holdings": [position_payload(item) for item in holdings],
+        "positions": [position_payload(item) for item in current_positions],
+        "orders": [{
+            "order_id": item.order_id,
+            "exchange": item.exchange,
+            "exchange_instrument_id": item.exchange_instrument_id,
+            "symbol": item.symbol,
+            "side": item.side,
+            "quantity": item.quantity,
+            "status": item.status,
+            "updated_at": item.updated_at,
+        } for item in order_status],
+    }
+
+
+@router.post("/broker/connect")
+async def connect_broker(
+    body: BrokerConnect,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    account = await locked_account(db, user)
+    return await _connect_mock(db, user, account)
+
+
+@router.post("/broker/disconnect")
+async def disconnect_broker(user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+    account = await locked_account(db, user)
+    return await _disconnect_mock(db, user, account)
+
+
+@router.get("/broker/health")
+async def broker_health(user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+    _, connection = await _require_mock_connection(db, user)
+    expires_at = connection.credential_expires_at if connection else None
+    try:
+        result = await bounded_broker_read(lambda: broker.health(expires_at, datetime.now(timezone.utc)))
+    except BrokerAuthorizationError:
+        if connection:
+            connection.status = "expired"
+            connection.last_sync_status = "expired"
+            connection.last_sync_error = "authorization_expired"
+        account = await db.get(Account, user.id)
+        account.broker_connected = False
+        audit(db, user.id, "broker.authorization_expired", "mock")
+        await db.commit()
+        raise HTTPException(409, "Mock broker authorization expired; reconnect to continue")
+    if connection:
+        connection.last_health_check_at = result.checked_at
+        await db.commit()
+    return {"provider": "mock", "status": result.status, "checked_at": result.checked_at, "expires_at": result.expires_at}
+
+
+@router.get("/broker/account")
+async def broker_account(user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+    return (await _mock_snapshot(db, user))["account"]
+
+
+@router.get("/broker/holdings")
+async def broker_holdings(user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+    return (await _mock_snapshot(db, user))["holdings"]
+
+
+@router.get("/broker/positions")
+async def broker_positions(user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+    return (await _mock_snapshot(db, user))["positions"]
+
+
+@router.get("/broker/orders")
+async def broker_orders(user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+    return (await _mock_snapshot(db, user))["orders"]
+
+
+@router.post("/broker/sync")
+async def sync_broker(user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+    connection = await _mock_connection(db, user.id)
+    try:
+        _, connection = await _require_mock_connection(db, user)
+        health = await bounded_broker_read(
+            lambda: broker.health(
+                connection.credential_expires_at if connection else None,
+                datetime.now(timezone.utc),
+            )
+        )
+        if connection:
+            connection.last_health_check_at = health.checked_at
+        snapshot = await _mock_snapshot(db, user)
+    except HTTPException as error:
+        if connection:
+            connection.last_synced_at = datetime.now(timezone.utc)
+            expired = error.status_code == 409 and "expired" in str(error.detail).lower()
+            connection.last_sync_status = "expired" if expired else "error"
+            connection.last_sync_error = "authorization_expired" if expired else (
+                "rate_limited" if error.status_code == 429 else "sync_failed"
+            )
+            await db.commit()
+        raise
+    synced_at = datetime.now(timezone.utc)
+    if connection:
+        connection.last_synced_at = synced_at
+        connection.last_sync_status = "success"
+        connection.last_sync_error = None
+    audit(db, user.id, "broker.sync.completed", "mock:paper_ledger_mirror")
+    await db.commit()
+    return snapshot | {"synced_at": synced_at, "sync_status": "success"}
+
+
 @router.post("/risk/kill-switch")
 async def kill_switch(body: Switch, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
     account = await locked_account(db, user)
@@ -290,10 +564,8 @@ async def kill_switch(body: Switch, user: User = Depends(get_current_user), db: 
 @router.post("/broker")
 async def broker_switch(body: Switch, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
     account = await locked_account(db, user)
-    account.broker_connected = body.enabled
-    audit(db, user.id, "broker.connected" if body.enabled else "broker.disconnected", "Mock broker")
-    await db.commit()
-    return {"connected": body.enabled, "broker": "GNK Paper", "mode": "paper"}
+    result = await (_connect_mock(db, user, account) if body.enabled else _disconnect_mock(db, user, account))
+    return {"connected": body.enabled, "broker": "GNK Mock Paper", "mode": "paper", **result}
 
 class Onboarding(BaseModel):
     name: str = Field(min_length=2, max_length=80, pattern=r"\S")

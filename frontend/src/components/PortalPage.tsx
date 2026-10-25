@@ -12,7 +12,22 @@ type Security = {
   sessions: { id: string; current: boolean; created_at: string; expires_at: string; ip_address: string | null; user_agent: string | null }[];
   login_history: { id: string; created_at: string; ip_address: string | null; user_agent: string | null }[];
 };
-type Broker = { provider: string; label: string; connected: boolean; mode: string };
+type BrokerProvider = {
+  id: string; name: string; available: boolean;
+  capabilities: { exchanges: string[]; segments: string[]; order_placement: boolean } | null;
+};
+type Broker = {
+  provider: string; label: string; connected: boolean; status: string; mode: string;
+  expires_at: string | null; last_health_check_at: string | null; last_synced_at: string | null;
+  last_sync_status: string | null; last_sync_error: string | null;
+};
+type BrokerSnapshot = {
+  synced_at: string; sync_status: string;
+  account: { currency: string; cash: string; equity: string; invested: string };
+  holdings: { exchange: string; symbol: string; quantity: number; average_price: string; last_price: string }[];
+  positions: { exchange: string; symbol: string; quantity: number; unrealized_pnl: string }[];
+  orders: { order_id: string; exchange: string; symbol: string; status: string }[];
+};
 
 const titles: Record<Section, { title: string; description: string }> = {
   profile: { title: "Personal profile", description: "Keep the name on your workspace up to date." },
@@ -26,6 +41,8 @@ export default function PortalPage({ section }: { section: Section }) {
   const [user, setUser] = useState<User | null>(null);
   const [security, setSecurity] = useState<Security | null>(null);
   const [brokers, setBrokers] = useState<Broker[]>([]);
+  const [brokerProviders, setBrokerProviders] = useState<BrokerProvider[]>([]);
+  const [brokerSnapshot, setBrokerSnapshot] = useState<BrokerSnapshot | null>(null);
   const [mfaSecret, setMfaSecret] = useState("");
   const [verificationLink, setVerificationLink] = useState("");
   const [message, setMessage] = useState("");
@@ -37,7 +54,11 @@ export default function PortalPage({ section }: { section: Section }) {
       const current = await api<User>("/profile");
       setUser(current);
       if (section === "security") setSecurity(await api<Security>("/settings/security"));
-      if (section === "brokers") setBrokers((await api<{ connections: Broker[] }>("/settings/brokers")).connections);
+      if (section === "brokers") {
+        const result = await api<{ connections: Broker[]; providers: BrokerProvider[] }>("/settings/brokers");
+        setBrokers(result.connections);
+        setBrokerProviders(result.providers);
+      }
     } catch (err) {
       if (err instanceof ApiError && err.status === 401) router.push("/login");
       else setError(err instanceof Error ? err.message : "Unable to load account settings.");
@@ -76,16 +97,46 @@ export default function PortalPage({ section }: { section: Section }) {
     }
   }
 
-  async function toggleBroker() {
-    if (!brokers[0]) return;
+  async function toggleBroker(provider: string, connected: boolean) {
     setBusy(true);
     setError("");
     try {
-      await api("/broker", json({ enabled: !brokers[0].connected }));
+      if (connected) await api("/broker/disconnect", json({}));
+      else await api("/broker/connect", json({ provider }));
       await load();
-      setMessage("Paper broker connection updated.");
+      setMessage(connected ? "Mock broker disconnected." : "Mock paper broker connected.");
     } catch (err) {
       setError(err instanceof Error ? err.message : "Unable to update the paper broker.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function syncBroker() {
+    setBusy(true);
+    setError("");
+    try {
+      const result = await api<BrokerSnapshot>("/broker/sync", json({}));
+      setBrokerSnapshot(result);
+      await load();
+      setMessage("Mock paper account synchronized.");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Unable to synchronize the mock broker.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function checkBrokerHealth() {
+    setBusy(true);
+    setError("");
+    try {
+      const result = await api<{ status: string }>("/broker/health");
+      await load();
+      setMessage(`Mock broker health: ${result.status}.`);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Unable to check the mock broker connection.");
+      await load();
     } finally {
       setBusy(false);
     }
@@ -164,7 +215,24 @@ export default function PortalPage({ section }: { section: Section }) {
         <section className="portal-card"><h2>Active sessions</h2><p>Sessions use secure, HttpOnly cookies and are not stored in browser storage.</p>{security?.sessions.length ? security.sessions.map(session => <div className="session-row" key={session.id}><div><strong>{session.current ? "This device" : "Signed-in session"}</strong><small>{session.user_agent || "Unknown device"} · {session.ip_address || "IP unavailable"}</small><small>Signed in {new Date(session.created_at).toLocaleString()}</small></div>{session.current ? <span className="current-session">Current</span> : <button className="text-button" onClick={() => void revokeSession(session.id)}>Revoke</button>}</div>) : <p>No active sessions found.</p>}</section>
         <section className="portal-card"><h2>Recent login history</h2>{security?.login_history.length ? security.login_history.map(entry => <div className="session-row" key={entry.id}><div><strong>{new Date(entry.created_at).toLocaleString()}</strong><small>{entry.user_agent || "Unknown device"} · {entry.ip_address || "IP unavailable"}</small></div><span className="current-session">Successful</span></div>) : <p>No recent successful sign-ins found.</p>}</section>
       </div>}
-      {section === "brokers" && <section className="portal-card"><h2>Available connections</h2><p>Broker credentials and external access tokens are not collected in this paper-trading release.</p>{brokers.map(connection => <div className="broker-row" key={connection.provider}><div><strong>{connection.label}</strong><small>Simulation only · No live orders</small></div><span className={connection.connected ? "badge-verified" : "badge-pending"}>{connection.connected ? "Connected" : "Disconnected"}</span><button className="portal-secondary" disabled={busy} onClick={() => void toggleBroker()}>{connection.connected ? "Disconnect" : "Connect paper broker"}</button></div>)}</section>}
+      {section === "brokers" && <div className="portal-stack">
+        <section className="portal-card"><h2>Broker connections</h2><p>Only the local mock broker is available. Zerodha, Dhan and FYERS are listed for planning and do not accept credentials or connect to external services. Live order placement is disabled.</p>
+          {brokerProviders.map(provider => {
+            const connection = brokers.find(item => item.provider === provider.id);
+            return <div className="broker-row" key={provider.id}>
+              <div><strong>{provider.name}</strong><small>{provider.available ? "NSE/BSE paper simulation · INR · Equities and ETFs" : "Not implemented · No credentials collected"}</small>{connection && <small>Status: {connection.status}{connection.last_health_check_at ? ` · Health checked ${new Date(connection.last_health_check_at).toLocaleString()}` : ""}{connection.last_synced_at ? ` · Last sync ${new Date(connection.last_synced_at).toLocaleString()}` : ""}{connection.last_sync_error ? ` · ${connection.last_sync_error.replaceAll("_", " ")}` : ""}</small>}</div>
+              <span className={connection?.connected ? "badge-verified" : "badge-pending"}>{connection?.status || "unavailable"}</span>
+              {provider.available && <div className="inline">
+                {connection?.connected && <button className="portal-secondary" disabled={busy} onClick={() => void syncBroker()}>{busy ? "Syncing…" : "Sync paper data"}</button>}
+                {connection?.connected && <button className="portal-secondary" disabled={busy} onClick={() => void checkBrokerHealth()}>Check health</button>}
+                <button className="portal-secondary" disabled={busy} onClick={() => void toggleBroker(provider.id, Boolean(connection?.connected))}>{connection?.connected ? "Disconnect" : "Connect mock broker"}</button>
+              </div>}
+            </div>;
+          })}
+          <p className="portal-readonly">Mock authorization is local and expires after eight hours. No access token or broker credential is sent to or stored in the browser.</p>
+        </section>
+        {brokerSnapshot && <section className="portal-card"><h2>Last mock synchronization</h2><p>Read-only mirror of this account’s paper ledger · {new Date(brokerSnapshot.synced_at).toLocaleString()}</p><div className="portal-readonly"><span>Cash</span><strong>{brokerSnapshot.account.currency} {brokerSnapshot.account.cash}</strong></div><div className="portal-readonly"><span>Equity</span><strong>{brokerSnapshot.account.currency} {brokerSnapshot.account.equity}</strong></div><div className="portal-readonly"><span>Invested</span><strong>{brokerSnapshot.account.currency} {brokerSnapshot.account.invested}</strong></div><h3>Holdings and positions</h3>{brokerSnapshot.positions.length ? brokerSnapshot.positions.map(item => <div className="session-row" key={`${item.exchange}:${item.symbol}`}><div><strong>{item.exchange}:{item.symbol}</strong><small>{item.quantity} shares · P&amp;L {brokerSnapshot.account.currency} {item.unrealized_pnl}</small></div></div>) : <p>No paper holdings yet.</p>}<h3>Paper order statuses</h3>{brokerSnapshot.orders.slice(0, 10).map(item => <div className="session-row" key={item.order_id}><strong>{item.exchange}:{item.symbol}</strong><span className="current-session">{item.status}</span></div>)}</section>}
+      </div>}
     </div>
   </main>;
 }

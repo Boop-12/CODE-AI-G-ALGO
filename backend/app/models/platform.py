@@ -62,6 +62,7 @@ class Order(Base):
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
     user_id: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("user.id"), index=True)
     idempotency_key: Mapped[str] = mapped_column(String(100))
+    exchange: Mapped[str] = mapped_column(String(4), default="NSE")
     symbol: Mapped[str] = mapped_column(String(30))
     side: Mapped[str] = mapped_column(String(4))
     quantity: Mapped[int] = mapped_column(Integer)
@@ -73,12 +74,31 @@ class Order(Base):
 
 class Position(Base):
     __tablename__ = "paper_position"
-    __table_args__ = (UniqueConstraint("user_id", "symbol"),)
+    __table_args__ = (UniqueConstraint("user_id", "exchange", "symbol", name="uq_paper_position_user_exchange_symbol"),)
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
     user_id: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("user.id"), index=True)
+    exchange: Mapped[str] = mapped_column(String(4), default="NSE")
     symbol: Mapped[str] = mapped_column(String(30))
     quantity: Mapped[int] = mapped_column(Integer, default=0)
     average_price: Mapped[float] = mapped_column(Numeric(18, 2), default=0)
+
+
+class BrokerConnection(Base):
+    __tablename__ = "broker_connection"
+    __table_args__ = (UniqueConstraint("user_id", "provider", name="uq_broker_connection_user_provider"),)
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    user_id: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("user.id"), index=True)
+    provider: Mapped[str] = mapped_column(String(30))
+    status: Mapped[str] = mapped_column(String(20), default="disconnected")
+    account_label: Mapped[str] = mapped_column(String(100), default="GNK Mock Paper")
+    encrypted_access_token: Mapped[str | None] = mapped_column(Text, nullable=True)
+    credential_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_health_check_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_synced_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_sync_status: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    last_sync_error: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
 
 
 class AuditLog(Base):

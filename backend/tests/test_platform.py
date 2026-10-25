@@ -21,8 +21,10 @@ from fastapi.testclient import TestClient
 from sqlalchemy import select, text
 from app.main import app
 from app.db.session import engine, Base, AsyncSessionLocal
-from app.models import User, Role, Session, AuditLog, Position
+from app.models import User, Role, Session, AuditLog, Position, Account, BrokerConnection
 from app.core.security import hash_token
+from app.core.security import decrypt_sensitive_value, encrypt_sensitive_value
+from app.brokers import mock_broker
 
 
 @pytest.fixture(autouse=True)
@@ -597,3 +599,121 @@ def test_admin_bootstrap_duplicate_does_not_overwrite_and_password_limits(client
             assert verify_password("Original-admin-password-123!", admin.hashed_password)
             assert admin.name == "Original Admin"
     asyncio.run(run())
+
+
+def test_mock_broker_connection_sync_is_exchange_aware_and_tenant_scoped(client):
+    register(client, "broker-owner@example.com")
+    settings = client.get("/api/v1/settings/brokers").json()
+    assert {provider["id"] for provider in settings["providers"]} == {"mock", "zerodha", "dhan", "fyers"}
+    assert settings["providers"][0]["available"] is True
+    assert settings["providers"][0]["capabilities"]["exchanges"] == ["NSE", "BSE"]
+    assert settings["providers"][0]["capabilities"]["segments"] == ["EQUITY", "ETF"]
+    assert settings["providers"][0]["capabilities"]["order_placement"] is False
+    assert all(provider["available"] is False for provider in settings["providers"][1:])
+    assert settings["connections"][0]["connected"] is True
+    connected = client.post("/api/v1/broker/connect", json={"provider": "mock"})
+    assert connected.status_code == 200
+    assert "access_token" not in connected.json()
+    assert client.get("/api/v1/broker/health").json()["status"] == "connected"
+
+    instruments = client.get("/api/v1/instruments").json()
+    nse_reliance = next(item for item in instruments if item["exchange"] == "NSE" and item["symbol"] == "RELIANCE")
+    bse_reliance = next(item for item in instruments if item["exchange"] == "BSE" and item["symbol"] == "RELIANCE")
+    assert nse_reliance["exchange_instrument_id"] == "RELIANCE"
+    assert bse_reliance["exchange_instrument_id"] == "500325"
+    assert nse_reliance["currency"] == "INR" and nse_reliance["quantity_precision"] == 0
+    assert any(item["asset_class"] == "ETF" for item in instruments)
+    session = client.get("/api/v1/market/session").json()
+    assert session["exchange_timezone"] == "Asia/Kolkata"
+    assert session["holiday_calendar_loaded"] is False
+    assert session["enforced_for_paper_orders"] is False
+
+    for exchange in ("NSE", "BSE"):
+        order = client.post(
+            "/api/v1/orders",
+            json={"exchange": exchange, "symbol": "RELIANCE", "side": "BUY", "quantity": 2},
+            headers={"Idempotency-Key": f"broker-{exchange.lower()}-order"},
+        )
+        assert order.status_code == 201, order.text
+        assert order.json()["exchange"] == exchange
+        assert client.post(f"/api/v1/orders/{order.json()['id']}/fill").status_code == 200
+
+    first_sync = client.post("/api/v1/broker/sync").json()
+    second_sync = client.post("/api/v1/broker/sync").json()
+    assert first_sync["sync_status"] == second_sync["sync_status"] == "success"
+    assert first_sync["source"] == "paper_ledger_mirror"
+    assert {(item["exchange"], item["symbol"]) for item in first_sync["positions"]} == {
+        ("NSE", "RELIANCE"), ("BSE", "RELIANCE")
+    }
+    assert len(first_sync["orders"]) == len(second_sync["orders"]) == 2
+    assert client.get("/api/v1/broker/account").json()["currency"] == "INR"
+    assert len(client.get("/api/v1/broker/holdings").json()) == 2
+    assert client.get("/api/v1/settings/brokers").json()["connections"][0]["last_sync_status"] == "success"
+
+    async def inspect_connection():
+        async with AsyncSessionLocal() as db:
+            connection = (await db.execute(select(BrokerConnection))).scalar_one()
+            account = (await db.execute(select(Account))).scalar_one()
+            assert connection.status == "connected"
+            assert connection.last_sync_status == "success"
+            assert connection.encrypted_access_token is None
+            assert account.broker_connected is True
+    asyncio.run(inspect_connection())
+
+    with TestClient(app, headers={"Origin": "http://testserver"}) as other:
+        register(other, "other-broker-owner@example.com")
+        assert other.get("/api/v1/broker/positions").json() == []
+        assert other.post("/api/v1/broker/sync").json()["orders"] == []
+
+    disconnected = client.post("/api/v1/broker/disconnect")
+    assert disconnected.json()["status"] == "disconnected"
+    assert client.get("/api/v1/settings/brokers").json()["connections"][0]["connected"] is False
+    assert client.post("/api/v1/broker/sync").status_code == 409
+
+
+def test_mock_broker_expiration_and_bounded_rate_limit_handling(client):
+    register(client, "broker-expiry@example.com")
+    assert client.post("/api/v1/broker/connect", json={"provider": "mock"}).status_code == 200
+
+    async def expire_connection():
+        async with AsyncSessionLocal() as db:
+            connection = (await db.execute(select(BrokerConnection))).scalar_one()
+            connection.credential_expires_at = datetime.now(timezone.utc) - timedelta(minutes=1)
+            await db.commit()
+    asyncio.run(expire_connection())
+
+    expired = client.post("/api/v1/broker/sync")
+    assert expired.status_code == 409
+    assert "expired" in expired.json()["detail"].lower()
+    settings = client.get("/api/v1/settings/brokers").json()["connections"][0]
+    assert settings["status"] == "expired" and settings["connected"] is False
+    assert client.get("/api/v1/broker/health").status_code == 409
+    assert submit(client).status_code == 409
+
+    assert client.post("/api/v1/broker/connect", json={"provider": "mock"}).status_code == 200
+    before = mock_broker.rate_limit_attempts
+    mock_broker.rate_limit_failures = 1
+    try:
+        assert client.get("/api/v1/broker/health").status_code == 200
+        assert mock_broker.rate_limit_attempts - before == 2
+        before = mock_broker.rate_limit_attempts
+        mock_broker.rate_limit_failures = 3
+        limited = client.post("/api/v1/broker/sync")
+        assert limited.status_code == 429
+        assert mock_broker.rate_limit_attempts - before == 3
+    finally:
+        mock_broker.rate_limit_failures = 0
+
+    async def check_sync_failure():
+        async with AsyncSessionLocal() as db:
+            connection = (await db.execute(select(BrokerConnection))).scalar_one()
+            assert connection.last_sync_status == "error"
+            assert connection.last_sync_error == "rate_limited"
+    asyncio.run(check_sync_failure())
+
+
+def test_sensitive_token_encryption_helpers_do_not_store_plaintext():
+    token = "mock-provider-token-for-encryption-test"
+    encrypted = encrypt_sensitive_value(token)
+    assert token not in encrypted
+    assert decrypt_sensitive_value(encrypted) == token

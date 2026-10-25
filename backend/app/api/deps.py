@@ -5,7 +5,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 from app.core.security import hash_token
 from app.db.session import get_db
-from app.models import User, Session, Account
+from app.models import User, Session, Account, BrokerConnection, AuditLog
 
 async def get_current_user(request: Request, db: AsyncSession = Depends(get_db)) -> User:
     session = await db.get(Session, hash_token(request.cookies.get("gnk_session", "")))
@@ -29,4 +29,17 @@ async def get_super_admin(user: User = Depends(get_admin)) -> User:
     return user
 
 async def locked_account(db: AsyncSession, user: User) -> Account:
-    return (await db.execute(select(Account).where(Account.user_id == user.id).with_for_update())).scalar_one()
+    account = (await db.execute(select(Account).where(Account.user_id == user.id).with_for_update())).scalar_one()
+    connection = (await db.execute(select(BrokerConnection).where(
+        BrokerConnection.user_id == user.id, BrokerConnection.provider == "mock"
+    ))).scalar_one_or_none()
+    if connection and connection.status == "connected" and connection.credential_expires_at:
+        expires_at = connection.credential_expires_at.replace(tzinfo=timezone.utc) if connection.credential_expires_at.tzinfo is None else connection.credential_expires_at.astimezone(timezone.utc)
+        if expires_at <= datetime.now(timezone.utc):
+            connection.status = "expired"
+            connection.last_sync_status = "expired"
+            connection.last_sync_error = "authorization_expired"
+            account.broker_connected = False
+            db.add(AuditLog(user_id=user.id, action="broker.authorization_expired", detail="mock"))
+            await db.commit()
+    return account

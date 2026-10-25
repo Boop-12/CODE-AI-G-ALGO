@@ -51,10 +51,18 @@ def hash_token(token: str) -> str:
 
 
 def encrypt_mfa_secret(secret: str) -> str:
-    return _mfa_cipher().encrypt(secret.encode()).decode()
+    return encrypt_sensitive_value(secret)
 
 
 def decrypt_mfa_secret(encrypted: str) -> str:
+    return decrypt_sensitive_value(encrypted)
+
+
+def encrypt_sensitive_value(value: str) -> str:
+    return _mfa_cipher().encrypt(value.encode()).decode()
+
+
+def decrypt_sensitive_value(encrypted: str) -> str:
     return _mfa_cipher().decrypt(encrypted.encode()).decode()
 
 
