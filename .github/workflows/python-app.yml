@@ -44,6 +44,8 @@ jobs:
         run: python -m unittest discover -s ../deploy/tests -v
   frontend:
     runs-on: ubuntu-latest
+    env:
+      API_INTERNAL_URL: http://127.0.0.1:18080
     defaults:
       run:
         working-directory: frontend
@@ -58,6 +60,12 @@ jobs:
       - run: npm run lint
       - run: npm run build
       - run: npm run typecheck
+      - uses: actions/setup-python@v5
+        with: {python-version: "3.12"}
+      - run: pip install -r ../backend/requirements-dev.txt
+      - run: npx playwright install --with-deps chromium
+      - name: Verify public website, route compatibility and paper workflow
+        run: npm run test:e2e
   containers:
     runs-on: ubuntu-latest
     steps:

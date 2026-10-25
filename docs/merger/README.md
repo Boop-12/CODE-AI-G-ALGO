@@ -57,3 +57,14 @@ The production Nginx configuration already accepts `www.gnkalgo.com` and forward
 - Protected assets: all 7 original frontend assets match their SHA-256 hashes; Git whitespace check passed.
 - CI now runs on `merger/**` pushes and checks protected asset hashes. Production deployment remains manual-only.
 - User clarification: the final database technology is PostgreSQL and strong password security is required. Schema differences above remain observed code facts; final records must be unified through a tested additive import, never a reset. Prefer Argon2 for new hashes, retaining verification and gradual upgrade of existing PBKDF2 hashes.
+
+## Milestone 2: public-site integration
+
+- `/` now renders the original source homepage content, navigation, theme/accent controls and original JPG. Existing target PNG/SVG/favicon bytes were not changed. Source JPG was added under its original URL, with a matching SHA-256 checksum.
+- Source CSS is scoped through a CSS Module. Appearance data attributes live on the public-site wrapper, preventing source themes from altering account/admin/trading pages. Sign In remains visible on mobile.
+- `/dashboard` remains the authenticated trading portal. `/workspace` preserves the former guest workspace. Legacy `/account` redirects to protected `/profile`. Existing target auth/admin routes remain intact.
+- Locked dependencies installed successfully; Next.js 16.4.3 production build, lint and type checking pass. Three Chromium browser regressions pass: public content/assets/theme persistence and same-domain sign-in; mobile/protected/compatibility routes; account registration, dashboard, simulated order/fill, persistence after refresh, ordinary-user admin rejection and logout.
+- Browser backend always creates a fresh temporary SQLite database and disables SMTP; it cannot use private local configuration or send real orders. CI runs the same tests against the production frontend build. Traces and screenshots are disabled to avoid recording passwords/tokens.
+- No databases, environment files, existing branding assets, broker modules or trading modules were modified. No source files were deleted. Production website matching remains unverified because production was not accessed or deployed.
+
+Reproduce browser checks from frontend: set `API_INTERNAL_URL=http://127.0.0.1:18080` before `npm run build`; set `GNK_TEST_PYTHON` to the backend virtual-environment Python (or install backend dev requirements into the active Python), then run `npm run test:e2e`. The tests start and stop only their own local servers on ports 13000/18080 and refuse to reuse existing servers.

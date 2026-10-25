@@ -1,1 +1,3 @@
-import Workspace from "./workspace"; export default function Home() { return <Workspace />; }
+import PublicHome from "@/components/public-site/PublicHome";
+
+export default function Home() { return <PublicHome />; }

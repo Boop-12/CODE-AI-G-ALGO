@@ -39,3 +39,7 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# Browser-test output may contain account data; never commit it.
+/test-results/
+/playwright-report/
