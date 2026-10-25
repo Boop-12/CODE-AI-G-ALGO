@@ -21,7 +21,7 @@ For native Windows development, migration commands, GitHub setup, Oracle Ubuntu 
 ## Included
 
 - Supplied GNK branding; responsive light/dark workspace, market watch and searchable demonstration quotes.
-- Registration/login/logout; PBKDF2 password hashes, opaque hashed database sessions, HttpOnly cookies, expiry, Origin checks, email verification, password recovery and rate-limited auth endpoints.
+- Registration/login/logout; Argon2id password hashes with automatic upgrade of legacy PBKDF2 hashes after successful login, opaque hashed database sessions, HttpOnly cookies, expiry, Origin checks, email verification, password recovery and rate-limited auth endpoints.
 - Profile/preferences, session revocation, successful-login history, encrypted TOTP MFA setup and separate role-protected admin portal.
 - Searchable/paginated user administration, account activation/suspension, super-admin role management, audit logs and persistent registration/support settings.
 - Per-user paper accounts/orders/positions/audit trails; interactive administrator bootstrap.
@@ -61,3 +61,5 @@ Tests use an isolated SQLite test database by default. GNK_TEST_DATABASE_URL opt
 No default password, broker credential or payment credential is bundled. Never commit .env, private keys, runtime databases or backups. The application ports/database remain internal in the deployment stack. Oracle deployment and public domain verification require functioning server access and domain ownership.
 
 For server start/stop/rebuild/update and certificate renewal, see [service commands](docs/SERVICE_COMMANDS.md).
+
+Public homepage merger and preservation evidence: [merger record](docs/merger/README.md). The original guest paper workspace is retained at `/workspace`; authenticated access remains `/dashboard`.

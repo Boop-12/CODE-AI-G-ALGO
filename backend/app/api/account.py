@@ -277,7 +277,7 @@ async def forgot_password(body: ForgotPasswordBody, db: AsyncSession = Depends(g
 @router.post("/auth/reset-password")
 async def reset_password(body: ResetBody, db: AsyncSession = Depends(get_db)):
     token_hash = hash_token(body.token)
-    reset = (await db.execute(select(PasswordResetToken).where(PasswordResetToken.token == token_hash))).scalar_one_or_none()
+    reset = (await db.execute(select(PasswordResetToken).where(PasswordResetToken.token == token_hash).with_for_update())).scalar_one_or_none()
     if not reset or reset.used or _as_utc(reset.expires_at) <= datetime.now(timezone.utc):
         raise HTTPException(400, "Reset link is invalid or expired")
     user = await db.get(User, reset.user_id)
@@ -285,6 +285,11 @@ async def reset_password(body: ResetBody, db: AsyncSession = Depends(get_db)):
         raise HTTPException(400, "Reset link is invalid or expired")
     user.hashed_password = get_password_hash(body.new_password)
     reset.used = True
+    # Invalidate every outstanding link so an older reset email cannot be replayed.
+    for other in (await db.execute(select(PasswordResetToken).where(
+        PasswordResetToken.user_id == user.id, PasswordResetToken.used.is_(False)
+    ))).scalars():
+        other.used = True
     sessions = list((await db.execute(select(Session).where(Session.user_id == user.id))).scalars())
     for session in sessions:
         await db.delete(session)
@@ -313,12 +318,20 @@ async def start_mfa_setup(user: User = Depends(get_current_user), db: AsyncSessi
 @router.post("/auth/mfa/verify")
 async def confirm_mfa_setup(
     body: MFACode,
+    request: Request,
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
     if not user.mfa_secret or not verify_totp(decrypt_mfa_secret(user.mfa_secret), body.code):
         raise HTTPException(400, "Authenticator code is invalid")
     user.mfa_enabled = True
+    # Only this session proved possession of the authenticator during enrollment.
+    # Password-only sessions must not gain admin access when another device enrolls.
+    current_hash = hash_token(request.cookies.get("gnk_session", ""))
+    for session in (await db.execute(select(Session).where(
+        Session.user_id == user.id, Session.token_hash != current_hash
+    ))).scalars():
+        await db.delete(session)
     audit(db, user.id, "security.mfa.enabled")
     await db.commit()
     return {"mfa_enabled": True}

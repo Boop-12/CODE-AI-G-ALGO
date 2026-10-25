@@ -3,6 +3,7 @@ import time
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from fastapi.exceptions import RequestValidationError
 from sqlalchemy import text
 from app.core.config import settings
 from app.db.session import AsyncSessionLocal
@@ -13,6 +14,14 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name
 logger = logging.getLogger("gnkalgo")
 app = FastAPI(title=settings.PROJECT_NAME, openapi_url="/api/openapi.json", docs_url="/api/docs", redoc_url=None)
 app.add_middleware(CORSMiddleware, allow_origins=settings.origins, allow_credentials=True, allow_methods=["GET", "POST", "PATCH", "DELETE"], allow_headers=["Content-Type", "Idempotency-Key"])
+
+@app.exception_handler(RequestValidationError)
+async def sanitized_validation_error(request, exc: RequestValidationError):
+    # Validation errors must not echo submitted passwords, reset tokens or MFA codes.
+    errors = [{"loc": error.get("loc", ()), "msg": "Invalid value", "type": error.get("type", "value_error")}
+              for error in exc.errors()]
+    return JSONResponse(status_code=422, content={"detail": errors})
+
 
 @app.middleware("http")
 async def request_security(request: Request, call_next):

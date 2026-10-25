@@ -12,7 +12,7 @@ from sqlalchemy.orm import selectinload
 from app.api.deps import get_admin, get_current_user, locked_account
 from app.brokers import QUOTES, STRATEGIES, broker
 from app.core.config import settings
-from app.core.security import get_password_hash, verify_password, hash_token, decrypt_mfa_secret, verify_totp
+from app.core.security import get_password_hash, verify_password, hash_token, decrypt_mfa_secret, verify_totp, password_needs_rehash
 from app.core.mailer import action_url, deliver_link
 from app.db.session import get_db
 from app.models import User, Account, Session, Deployment, Order, Position, AuditLog, SupportTicket, EmailVerificationToken, LoginHistory, SystemSetting
@@ -88,6 +88,8 @@ async def login(body: Login, request: Request, response: Response, db: AsyncSess
         valid = bool(body.mfa_code and user.mfa_secret and verify_totp(decrypt_mfa_secret(user.mfa_secret), body.mfa_code))
     if not user or not valid or not user.is_active:
         raise HTTPException(401, "Email or password is incorrect")
+    if password_needs_rehash(user.hashed_password):
+        user.hashed_password = get_password_hash(body.password)
     await start_session(db, response, user.id, request)
     db.add(LoginHistory(
         user_id=user.id,
@@ -126,7 +128,7 @@ async def dashboard(user: User = Depends(get_current_user), db: AsyncSession = D
     deployments = (await db.execute(select(Deployment).where(Deployment.user_id == user.id))).scalars().all()
     orders = (await db.execute(select(Order).where(Order.user_id == user.id).order_by(Order.created_at.desc()).limit(8))).scalars().all()
     value = sum((p["ltp"] * p["quantity"] for p in positions), Decimal(0))
-    return {"mode": "paper", "market_source": "demonstration", "cash": account.cash, "equity": account.cash + value, "invested": value, "realized_pnl": account.realized_pnl, "unrealized_pnl": sum((p["pnl"] for p in positions), Decimal(0)), "killed": account.killed, "broker_connected": account.broker_connected, "kyc_status": account.kyc_status, "subscription": "Paper workspace · Free", "active_strategies": sum(d.state == "active" for d in deployments), "positions": positions, "recent_orders": [row(o, "id symbol side quantity price state created_at") for o in orders]}
+    return {"mode": "paper", "market_source": "demonstration", "cash": account.cash, "equity": account.cash + value, "invested": value, "realized_pnl": account.realized_pnl, "unrealized_pnl": sum((p["pnl"] for p in positions), Decimal(0)), "killed": account.killed, "broker_connected": account.broker_connected, "kyc_status": account.kyc_status, "subscription": "Paper workspace Â· Free", "active_strategies": sum(d.state == "active" for d in deployments), "positions": positions, "recent_orders": [row(o, "id symbol side quantity price state created_at") for o in orders]}
 
 @router.get("/strategies")
 async def strategies(user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):

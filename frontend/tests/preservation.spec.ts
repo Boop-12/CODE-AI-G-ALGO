@@ -78,3 +78,34 @@ test("integrated registration, dashboard, manual paper fill and admin rejection"
   await page.goto("/dashboard");
   await expect(page).toHaveURL(/\/login$/);
 });
+
+
+test("fragment recovery tokens and older verification links remain compatible", async ({ page }) => {
+  const email = `recovery-${Date.now()}@example.com`;
+  const headers = { Origin: "http://127.0.0.1:13000" };
+  const registered = await page.request.post("/api/v1/auth/register", {
+    headers, data: { name: "Recovery Trader", email, password: "Original-browser-password-123!" },
+  });
+  expect(registered.status()).toBe(201);
+  const verificationUrl = (await registered.json()).development_verification_url as string;
+  expect(verificationUrl).toContain("#token=");
+  await page.request.post("/api/v1/auth/logout", { headers });
+  const recovery = await page.request.post("/api/v1/auth/forgot-password", { headers, data: { email } });
+  const resetUrl = (await recovery.json()).development_url as string;
+  expect(resetUrl).toContain("#token=");
+  await page.goto(resetUrl);
+  await page.locator('input[name="password"]').fill("Replacement-browser-password-456!");
+  await page.locator('input[name="confirm_password"]').fill("Replacement-browser-password-456!");
+  await page.getByRole("button", { name: "Save new password", exact: true }).click();
+  await expect(page.getByRole("status")).toContainText("Password updated");
+  const login = await page.request.post("/api/v1/auth/login", {
+    headers, data: { email, password: "Replacement-browser-password-456!" },
+  });
+  expect(login.status()).toBe(200);
+  // Pre-merger email links with query tokens continue to work during cutover.
+  await page.goto(verificationUrl.replace("#token=", "?token="));
+  await page.getByRole("button", { name: "Verify email", exact: true }).click();
+  await expect(page.getByRole("status")).toContainText("Email verified");
+  const profile = await page.request.get("/api/v1/profile");
+  expect((await profile.json()).email_verified).toBe(true);
+});

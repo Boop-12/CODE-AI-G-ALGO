@@ -12,7 +12,7 @@ type AuthResult = { roles: string[]; mfa_enabled?: boolean; development_verifica
 const copy: Record<Mode, { eyebrow: string; title: string; description: string; submit: string }> = {
   login: { eyebrow: "WELCOME BACK", title: "Sign in to your workspace", description: "Your paper portfolio and trading research are ready when you are.", submit: "Sign in" },
   register: { eyebrow: "START PRACTICING", title: "Create your account", description: "Build confidence with a paper-trading workspace. No real funds are used.", submit: "Create account" },
-  "forgot-password": { eyebrow: "ACCOUNT RECOVERY", title: "Reset your password", description: "Enter your account email and we’ll send a secure reset link.", submit: "Send reset link" },
+  "forgot-password": { eyebrow: "ACCOUNT RECOVERY", title: "Reset your password", description: "Enter your account email and weâ€™ll send a secure reset link.", submit: "Send reset link" },
   "reset-password": { eyebrow: "ACCOUNT RECOVERY", title: "Choose a new password", description: "Use at least 12 characters. Reset links expire after 30 minutes.", submit: "Save new password" },
   "verify-email": { eyebrow: "EMAIL VERIFICATION", title: "Verify your email", description: "Confirm your email address to keep your account details current.", submit: "Verify email" },
   "admin-login": { eyebrow: "SECURE ADMINISTRATION", title: "Administrator sign in", description: "Administrator accounts require an authenticator code after MFA is enabled.", submit: "Continue to admin portal" },
@@ -34,7 +34,8 @@ export default function AuthPage({ mode }: { mode: Mode }) {
     setError("");
     setNotice("");
     const values = new FormData(event.currentTarget);
-    const actionToken = new URLSearchParams(window.location.search).get("token") ?? "";
+    const actionToken = new URLSearchParams(window.location.hash.slice(1)).get("token")
+      ?? new URLSearchParams(window.location.search).get("token") ?? "";
     try {
       if (mode === "login" || mode === "admin-login") {
         const user = await api<AuthResult>("/auth/login", json({
@@ -107,7 +108,7 @@ export default function AuthPage({ mode }: { mode: Mode }) {
           {(mode === "login" || mode === "admin-login") && <label>Authenticator code (if enabled) <input name="mfa_code" inputMode="numeric" autoComplete="one-time-code" pattern="[0-9]{6}" maxLength={6} placeholder="6-digit code" /></label>}
           {mode === "reset-password" && <label>Confirm new password<input name="confirm_password" type={showPassword ? "text" : "password"} required minLength={12} maxLength={128} autoComplete="new-password" onInput={event => { const input = event.currentTarget; input.setCustomValidity(input.value === (input.form?.elements.namedItem("password") as HTMLInputElement | null)?.value ? "" : "Passwords do not match"); }} placeholder="Repeat your password" /></label>}
           {error && <p className="portal-error" role="alert">{error}</p>}
-          <button className="portal-primary" type="submit" disabled={busy || (mode === "verify-email" && verified)}>{busy ? <><span className="spinner" /> Working…</> : details.submit}</button>
+          <button className="portal-primary" type="submit" disabled={busy || (mode === "verify-email" && verified)}>{busy ? <><span className="spinner" /> Workingâ€¦</> : details.submit}</button>
         </form> : null}
         {error && mode === "verify-email" && <p className="portal-error" role="alert">{error}</p>}
         <div className="auth-links">

@@ -11,7 +11,7 @@ logger = logging.getLogger("gnkalgo.mail")
 
 
 def action_url(page: str, token: str) -> str:
-    return f"{settings.APP_BASE_URL.rstrip('/')}/{page}?token={quote(token)}"
+    return f"{settings.APP_BASE_URL.rstrip('/')}/{page}#token={quote(token)}"
 
 
 def _send_sync(recipient: str, subject: str, body: str) -> None:

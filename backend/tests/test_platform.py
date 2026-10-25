@@ -82,7 +82,7 @@ def test_password_and_session_are_hashed(client):
         async with AsyncSessionLocal() as db:
             user = (await db.execute(select(User))).scalar_one()
             session = (await db.execute(select(Session))).scalar_one()
-            assert user.hashed_password.startswith("pbkdf2_sha256$")
+            assert user.hashed_password.startswith("$argon2id$")
             assert client.cookies.get("gnk_session") != session.token_hash
     asyncio.run(inspect())
 
@@ -262,7 +262,7 @@ def test_email_verification_profile_settings_and_password_reset(client):
     })
     assert registered.status_code == 201
     verify_url = registered.json()["development_verification_url"]
-    verify_token = parse_qs(urlparse(verify_url).query)["token"][0]
+    verify_token = parse_qs(urlparse(verify_url).fragment)["token"][0]
     assert client.get("/api/v1/profile").json()["email_verified"] is False
     assert client.post("/api/v1/auth/verify-email", json={"token": verify_token}).json()["status"] == "email_verified"
     assert client.get("/api/v1/profile").json()["email_verified"] is True
@@ -277,7 +277,7 @@ def test_email_verification_profile_settings_and_password_reset(client):
 
     reset = client.post("/api/v1/auth/forgot-password", json={"email": "verified@example.com"})
     reset_url = reset.json()["development_url"]
-    reset_token = parse_qs(urlparse(reset_url).query)["token"][0]
+    reset_token = parse_qs(urlparse(reset_url).fragment)["token"][0]
     async def stored_hash():
         from app.models import PasswordResetToken
         async with AsyncSessionLocal() as db:
@@ -336,3 +336,66 @@ def test_concurrent_fills_do_not_duplicate_position(client):
             assert [r.status_code for r in responses] == [200, 200]
     asyncio.run(race())
     assert client.get("/api/v1/positions").json()[0]["quantity"] == 10
+
+
+def test_legacy_password_upgrade_only_after_successful_login(client):
+    user = register(client, "legacy@example.com")
+    salt = "0123456789abcdef0123456789abcdef"
+    password = "A-long-test-password-123"
+    digest = hashlib.pbkdf2_hmac("sha256", password.encode(), salt.encode(), 600_000).hex()
+    legacy = f"pbkdf2_sha256$600000${salt}${digest}"
+
+    async def set_legacy():
+        async with AsyncSessionLocal() as db:
+            account = await db.get(User, uuid.UUID(user["id"]))
+            account.hashed_password = legacy
+            await db.commit()
+    asyncio.run(set_legacy())
+    client.post("/api/v1/auth/logout")
+    assert client.post("/api/v1/auth/login", json={"email": "legacy@example.com", "password": "wrong-password"}).status_code == 401
+
+    async def password_hash():
+        async with AsyncSessionLocal() as db:
+            return (await db.get(User, uuid.UUID(user["id"]))).hashed_password
+    assert asyncio.run(password_hash()) == legacy
+    assert client.post("/api/v1/auth/login", json={"email": "legacy@example.com", "password": password}).status_code == 200
+    assert asyncio.run(password_hash()).startswith("$argon2id$")
+
+
+def test_validation_never_echoes_secrets(client):
+    password = "short-secret"
+    result = client.post("/api/v1/auth/register", json={"name": "Trader", "email": "invalid", "password": password})
+    assert result.status_code == 422 and password not in result.text
+    token = "private-token-too-short"
+    result = client.post("/api/v1/auth/reset-password", json={"token": token, "new_password": password})
+    assert result.status_code == 422 and token not in result.text and password not in result.text
+
+
+def test_reset_invalidates_all_outstanding_links(client):
+    register(client, "multiple-reset@example.com")
+    tokens = []
+    for _ in range(2):
+        response = client.post("/api/v1/auth/forgot-password", json={"email": "multiple-reset@example.com"})
+        tokens.append(parse_qs(urlparse(response.json()["development_url"]).fragment)["token"][0])
+    assert client.post("/api/v1/auth/reset-password", json={"token": tokens[1], "new_password": "Replacement-password-123!"}).status_code == 200
+    assert client.post("/api/v1/auth/reset-password", json={"token": tokens[0], "new_password": "Attacker-password-123!"}).status_code == 400
+
+
+def test_mfa_enrollment_revokes_other_password_only_sessions(client):
+    user = register(client, "enrollment-admin@example.com")
+    other = TestClient(app, headers={"Origin": "http://testserver"})
+    assert other.post("/api/v1/auth/login", json={"email": user["email"], "password": "A-long-test-password-123"}).status_code == 200
+
+    async def promote():
+        from sqlalchemy.orm import selectinload
+        async with AsyncSessionLocal() as db:
+            account = (await db.execute(select(User).options(selectinload(User.roles)).where(User.id == uuid.UUID(user["id"])))).scalar_one()
+            account.roles.append(Role(name="admin"))
+            await db.commit()
+    asyncio.run(promote())
+    assert other.get("/api/v1/admin/overview").status_code == 403
+    secret = client.post("/api/v1/auth/mfa/setup", json={}).json()["secret"]
+    assert client.post("/api/v1/auth/mfa/verify", json={"code": totp_code(secret)}).status_code == 200
+    assert client.get("/api/v1/admin/overview").status_code == 200
+    assert other.get("/api/v1/me").status_code == 401
+    other.close()
