@@ -1,7 +1,7 @@
 name: GNK Algo CI
 on:
   push:
-    branches: [main]
+    branches: [main, "merger/**"]
   pull_request:
   workflow_dispatch:
 permissions:
@@ -37,6 +37,8 @@ jobs:
           alembic check
           alembic downgrade base
           alembic upgrade head
+      - name: Verify immutable project branding
+        run: python ../deploy/check_branding.py
       - run: python -m pytest tests -q
       - name: Verify production TLS preflight checks
         run: python -m unittest discover -s ../deploy/tests -v
