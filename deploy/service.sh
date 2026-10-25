@@ -32,7 +32,7 @@ case "$action" in
     nginx-recreate)
         python3 deploy/preflight.py
         "${compose[@]}" run --rm --no-deps nginx nginx -t
-        "${compose[@]}" up -d --no-deps --force-recreate nginx
+        "${compose[@]}" up -d --no-deps --force-recreate --wait --wait-timeout 90 nginx
         ;;
     health) bash deploy/validate.sh ;;
     *) echo 'Usage: bash deploy/service.sh {status|start|stop|restart|build|deploy|update|logs [service]|nginx-test|nginx-recreate|health}' >&2; exit 1 ;;
