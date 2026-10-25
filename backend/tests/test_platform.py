@@ -9,7 +9,9 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from urllib.parse import urlparse, parse_qs
+from unittest.mock import AsyncMock
 import httpx
+from cryptography.fernet import Fernet
 
 os.environ["DATABASE_URL"] = os.getenv("GNK_TEST_DATABASE_URL", "sqlite+aiosqlite:///./test-platform.db")
 os.environ["COOKIE_SECURE"] = "false"
@@ -23,8 +25,10 @@ from app.main import app
 from app.db.session import engine, Base, AsyncSessionLocal
 from app.models import User, Role, Session, AuditLog, Position, Account, BrokerConnection
 from app.core.security import hash_token
-from app.core.security import decrypt_sensitive_value, encrypt_sensitive_value
+from app.core.security import decrypt_broker_token, decrypt_sensitive_value, encrypt_sensitive_value
 from app.brokers import mock_broker
+from app.broker_providers import PROVIDERS, ProviderSnapshot, ProviderTokens
+from app.core.config import settings
 
 
 @pytest.fixture(autouse=True)
@@ -717,3 +721,179 @@ def test_sensitive_token_encryption_helpers_do_not_store_plaintext():
     encrypted = encrypt_sensitive_value(token)
     assert token not in encrypted
     assert decrypt_sensitive_value(encrypted) == token
+
+
+def test_live_broker_authorization_sync_tenant_isolation_and_disconnect(client, monkeypatch):
+    monkeypatch.setattr(settings, "ENVIRONMENT", "production")
+    monkeypatch.setattr(settings, "BROKER_TOKEN_ENCRYPTION_KEY", Fernet.generate_key().decode())
+    adapter = PROVIDERS["zerodha"]
+    monkeypatch.setattr(adapter, "configured", lambda: True)
+    monkeypatch.setattr(adapter, "begin_authorization", AsyncMock(return_value=(
+        "https://broker.example/authorize", None
+    )))
+    monkeypatch.setattr(adapter, "complete_authorization", AsyncMock(return_value=ProviderTokens(
+        access_token="server-only-access-token",
+        expires_at=datetime.now(timezone.utc) + timedelta(hours=8),
+        account_id="provider-account-123",
+        account_label="Zerodha account",
+    )))
+    snapshot = ProviderSnapshot(
+        provider="zerodha",
+        account={"currency": "INR", "available_balance": Decimal("1234.50")},
+        holdings=[{"exchange": "NSE", "symbol": "TEST", "quantity": 2}],
+        positions=[],
+        orders=[],
+        fetched_at=datetime.now(timezone.utc),
+    )
+    monkeypatch.setattr(adapter, "snapshot", AsyncMock(return_value=snapshot))
+
+    register(client, "live-broker-owner@example.com")
+    owner_cookie = client.cookies.get("gnk_session")
+    started = client.post("/api/v1/broker/zerodha/connect", json={})
+    assert started.status_code == 200, started.text
+    assert started.json()["authorization_url"] == "https://broker.example/authorize"
+    assert "access_token" not in started.text
+    state = client.cookies.get("gnk_broker_state_zerodha")
+    assert state
+
+    callback = client.get(
+        f"/api/v1/broker/callback/zerodha?status=success&request_token=one-time&state={state}",
+        follow_redirects=False,
+    )
+    assert callback.status_code == 303
+    assert "connection=connected" in callback.headers["location"]
+    replay = client.get(
+        f"/api/v1/broker/callback/zerodha?status=success&request_token=one-time&state={state}",
+        follow_redirects=False,
+    )
+    assert replay.status_code == 400
+
+    async def check_stored_token():
+        async with AsyncSessionLocal() as db:
+            connection = (await db.execute(select(BrokerConnection))).scalar_one()
+            assert connection.provider == "zerodha"
+            assert connection.provider_account_id == "provider-account-123"
+            assert connection.status == "connected"
+            assert connection.encrypted_access_token != "server-only-access-token"
+            assert decrypt_broker_token(connection.encrypted_access_token) == "server-only-access-token"
+    asyncio.run(check_stored_token())
+
+    broker_settings = client.get("/api/v1/settings/brokers")
+    assert broker_settings.status_code == 200
+    assert {item["id"] for item in broker_settings.json()["providers"]} == {"zerodha", "dhan", "fyers"}
+    assert all(item["capabilities"]["order_placement"] is False for item in broker_settings.json()["providers"])
+    assert "server-only-access-token" not in broker_settings.text
+
+    sync1 = client.post("/api/v1/broker/zerodha/sync")
+    sync2 = client.post("/api/v1/broker/zerodha/sync")
+    assert sync1.status_code == sync2.status_code == 200
+    assert sync1.json()["account"]["available_balance"] == "1234.50"
+    assert sync1.json()["sync_status"] == sync2.json()["sync_status"] == "success"
+    assert "server-only-access-token" not in sync1.text
+
+    register(client, "other-live-broker-user@example.com")
+    assert client.post("/api/v1/broker/zerodha/sync").status_code == 409
+    client.cookies.set("gnk_session", owner_cookie)
+    disconnected = client.post("/api/v1/broker/zerodha/disconnect")
+    assert disconnected.status_code == 200
+    assert disconnected.json()["local_token_deleted"] is True
+    assert disconnected.json()["provider_session_revoked"] is False
+
+    async def check_disconnected():
+        async with AsyncSessionLocal() as db:
+            connection = (await db.execute(select(BrokerConnection))).scalar_one()
+            assert connection.status == "disconnected"
+            assert connection.encrypted_access_token is None
+    asyncio.run(check_disconnected())
+
+
+def test_live_broker_authorization_is_production_only(client):
+    register(client, "production-gated-broker@example.com")
+    response = client.post("/api/v1/broker/zerodha/connect", json={})
+    assert response.status_code == 404
+
+
+def test_real_provider_auth_flows_use_mocked_http_and_provider_expiry(monkeypatch):
+    import hashlib
+    import app.broker_providers as broker_providers
+    from zoneinfo import ZoneInfo
+
+    monkeypatch.setattr(settings, "ZERODHA_API_KEY", "test-zerodha-app")
+    monkeypatch.setattr(settings, "ZERODHA_API_SECRET", "test-zerodha-secret")
+    zerodha_exchange = AsyncMock(return_value={
+        "status": "success",
+        "data": {"access_token": "zerodha-token", "user_id": "Z123"},
+    })
+    monkeypatch.setattr(broker_providers, "_request_json", zerodha_exchange)
+    now_ist = datetime.now(ZoneInfo("Asia/Kolkata"))
+    zerodha_tokens = asyncio.run(PROVIDERS["zerodha"].complete_authorization(
+        {"status": "success", "request_token": "one-time-token"}, None
+    ))
+    expiry_ist = zerodha_tokens.expires_at.astimezone(ZoneInfo("Asia/Kolkata"))
+    assert expiry_ist.hour == 6 and expiry_ist.minute == 0
+    assert expiry_ist.date() > now_ist.date()
+    assert zerodha_exchange.await_args.args[0] == "POST"
+
+    monkeypatch.setattr(settings, "DHAN_PARTNER_ID", "test-partner")
+    monkeypatch.setattr(settings, "DHAN_PARTNER_SECRET", "test-partner-secret")
+    dhan_exchange = AsyncMock(return_value={
+        "accessToken": "dhan-token",
+        "expiryTime": "2030-01-02T13:00:00+05:30",
+        "dhanClientId": "D123",
+    })
+    monkeypatch.setattr(broker_providers, "_request_json", dhan_exchange)
+    dhan_tokens = asyncio.run(PROVIDERS["dhan"].complete_authorization({"tokenId": "temporary-token"}, "consent"))
+    assert dhan_tokens.expires_at == datetime(2030, 1, 2, 7, 30, tzinfo=timezone.utc)
+
+    monkeypatch.setattr(settings, "FYERS_APP_ID", "test-fyers-app")
+    monkeypatch.setattr(settings, "FYERS_SECRET_KEY", "test-fyers-secret")
+    fyers_exchange = AsyncMock(return_value={
+        "s": "ok", "access_token": "fyers-token", "fy_id": "F123",
+    })
+    monkeypatch.setattr(broker_providers, "_request_json", fyers_exchange)
+    fyers_url, _ = asyncio.run(PROVIDERS["fyers"].begin_authorization("csrf-state"))
+    assert "csrf-state" in fyers_url
+    fyers_tokens = asyncio.run(PROVIDERS["fyers"].complete_authorization({"auth_code": "one-time-code"}, None))
+    assert fyers_tokens.expires_at is None
+    assert fyers_tokens.account_id == "F123"
+    assert fyers_exchange.await_args.kwargs["json"]["appIdHash"] == hashlib.sha256(
+        b"test-fyers-app:test-fyers-secret"
+    ).hexdigest()
+
+
+def test_provider_get_rate_limit_retries_are_bounded(monkeypatch):
+    import app.broker_providers as broker_providers
+
+    attempts = []
+
+    class Response:
+        headers = {"Retry-After": "0"}
+
+        def __init__(self, status_code):
+            self.status_code = status_code
+
+        def json(self):
+            return {"status": "success", "data": []}
+
+    class Client:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_):
+            return None
+
+        async def request(self, *_args, **_kwargs):
+            attempts.append(1)
+            return Response(429 if len(attempts) < 3 else 200)
+
+    monkeypatch.setattr(broker_providers.httpx, "AsyncClient", lambda **_: Client())
+    monkeypatch.setattr(broker_providers.asyncio, "sleep", AsyncMock())
+    response = asyncio.run(broker_providers._request_json("GET", "https://broker.example/read"))
+    assert response["status"] == "success"
+    assert len(attempts) == 3
+
+    attempts.clear()
+    with pytest.raises(broker_providers.BrokerProviderError) as error:
+        asyncio.run(broker_providers._request_json("POST", "https://broker.example/auth"))
+    assert error.value.rate_limited is True
+    assert len(attempts) == 1

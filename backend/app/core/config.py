@@ -1,6 +1,7 @@
 from pydantic import model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from sqlalchemy.engine import URL
+from cryptography.fernet import Fernet
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
@@ -21,9 +22,36 @@ class Settings(BaseSettings):
     SMTP_PASSWORD: str | None = None
     SMTP_FROM: str | None = None
     APP_BASE_URL: str = "http://localhost:3000"
+    BROKER_TOKEN_ENCRYPTION_KEY: str | None = None
+    ZERODHA_API_KEY: str | None = None
+    ZERODHA_API_SECRET: str | None = None
+    DHAN_PARTNER_ID: str | None = None
+    DHAN_PARTNER_SECRET: str | None = None
+    FYERS_APP_ID: str | None = None
+    FYERS_SECRET_KEY: str | None = None
+    BROKER_HTTP_TIMEOUT_SECONDS: float = 10.0
 
     @model_validator(mode="after")
     def validate_production(self):
+        broker_credentials = (
+            self.ZERODHA_API_KEY, self.ZERODHA_API_SECRET,
+            self.DHAN_PARTNER_ID, self.DHAN_PARTNER_SECRET,
+            self.FYERS_APP_ID, self.FYERS_SECRET_KEY,
+        )
+        if any(broker_credentials) and not self.BROKER_TOKEN_ENCRYPTION_KEY:
+            raise ValueError("Broker integrations require BROKER_TOKEN_ENCRYPTION_KEY")
+        for name, first, second in (
+            ("Zerodha", self.ZERODHA_API_KEY, self.ZERODHA_API_SECRET),
+            ("Dhan partner", self.DHAN_PARTNER_ID, self.DHAN_PARTNER_SECRET),
+            ("FYERS", self.FYERS_APP_ID, self.FYERS_SECRET_KEY),
+        ):
+            if bool(first) != bool(second):
+                raise ValueError(f"{name} credentials must be configured together")
+        if self.BROKER_TOKEN_ENCRYPTION_KEY:
+            try:
+                Fernet(self.BROKER_TOKEN_ENCRYPTION_KEY.encode())
+            except (ValueError, TypeError):
+                raise ValueError("BROKER_TOKEN_ENCRYPTION_KEY must be a valid Fernet key") from None
         if self.ENVIRONMENT == "production":
             if len(self.SECRET_KEY) < 40 or self.SECRET_KEY.startswith("development"):
                 raise ValueError("Production requires a random SECRET_KEY of at least 40 characters")
@@ -33,6 +61,8 @@ class Settings(BaseSettings):
                 raise ValueError("Production requires SMTP_HOST and SMTP_FROM (or SMTP_USER) for account emails")
             if not self.APP_BASE_URL.startswith("https://"):
                 raise ValueError("Production requires an HTTPS APP_BASE_URL")
+        if self.BROKER_HTTP_TIMEOUT_SECONDS <= 0 or self.BROKER_HTTP_TIMEOUT_SECONDS > 60:
+            raise ValueError("BROKER_HTTP_TIMEOUT_SECONDS must be greater than zero and at most 60")
         return self
 
     @property

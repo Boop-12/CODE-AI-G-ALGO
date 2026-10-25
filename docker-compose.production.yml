@@ -1,4 +1,6 @@
 services:
+  api:
+    command: [uvicorn, app.main:app, --host, 0.0.0.0, --port, "8000", --no-proxy-headers, --no-access-log]
   nginx:
     healthcheck:
       test: [CMD-SHELL, "nginx -t >/dev/null 2>&1 && wget -q -O /dev/null http://127.0.0.1/nginx-health"]

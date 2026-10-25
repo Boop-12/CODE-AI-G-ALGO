@@ -14,7 +14,7 @@ type Security = {
 };
 type BrokerProvider = {
   id: string; name: string; available: boolean;
-  capabilities: { exchanges: string[]; segments: string[]; order_placement: boolean } | null;
+  capabilities: { account_summary: boolean; holdings: boolean; positions: boolean; order_status: boolean; order_placement: boolean } | null;
 };
 type Broker = {
   provider: string; label: string; connected: boolean; status: string; mode: string;
@@ -22,9 +22,15 @@ type Broker = {
   last_sync_status: string | null; last_sync_error: string | null;
 };
 type BrokerSnapshot = {
+  provider: string; fetched_at: string; sync_status: string;
+  account: { currency: string; account_name?: string | null; available_balance: string; equity?: string };
+  holdings: { exchange: string | null; symbol: string | null; quantity: number; average_price: string; last_price: string }[];
+  positions: { exchange: string | null; symbol: string | null; quantity: number; unrealized_pnl?: string }[];
+  orders: { order_id: string; exchange: string; symbol: string; status: string }[];
+};
+type MockBrokerSnapshot = {
   synced_at: string; sync_status: string;
   account: { currency: string; cash: string; equity: string; invested: string };
-  holdings: { exchange: string; symbol: string; quantity: number; average_price: string; last_price: string }[];
   positions: { exchange: string; symbol: string; quantity: number; unrealized_pnl: string }[];
   orders: { order_id: string; exchange: string; symbol: string; status: string }[];
 };
@@ -33,7 +39,7 @@ const titles: Record<Section, { title: string; description: string }> = {
   profile: { title: "Personal profile", description: "Keep the name on your workspace up to date." },
   account: { title: "Account preferences", description: "Manage your account status and display preferences." },
   security: { title: "Security", description: "Review sign-in activity and secure your account." },
-  brokers: { title: "Broker connections", description: "Manage the paper-only broker connection for this workspace." },
+  brokers: { title: "Broker connections", description: "Manage server-side, read-only production broker connections." },
 };
 
 export default function PortalPage({ section }: { section: Section }) {
@@ -43,6 +49,8 @@ export default function PortalPage({ section }: { section: Section }) {
   const [brokers, setBrokers] = useState<Broker[]>([]);
   const [brokerProviders, setBrokerProviders] = useState<BrokerProvider[]>([]);
   const [brokerSnapshot, setBrokerSnapshot] = useState<BrokerSnapshot | null>(null);
+  const [snapshotProvider, setSnapshotProvider] = useState("");
+  const [mockBrokerSnapshot, setMockBrokerSnapshot] = useState<MockBrokerSnapshot | null>(null);
   const [mfaSecret, setMfaSecret] = useState("");
   const [verificationLink, setVerificationLink] = useState("");
   const [message, setMessage] = useState("");
@@ -58,6 +66,15 @@ export default function PortalPage({ section }: { section: Section }) {
         const result = await api<{ connections: Broker[]; providers: BrokerProvider[] }>("/settings/brokers");
         setBrokers(result.connections);
         setBrokerProviders(result.providers);
+        const params = new URLSearchParams(window.location.search);
+        const provider = params.get("provider");
+        const state = params.get("connection");
+        if (provider && state) {
+          setMessage(state === "connected" ? `${provider} account connected.` :
+            state === "cancelled" ? `${provider} authorization was cancelled.` :
+              `${provider} authorization failed. Check the broker setup and try again.`);
+          window.history.replaceState({}, "", window.location.pathname);
+        }
       }
     } catch (err) {
       if (err instanceof ApiError && err.status === 401) router.push("/login");
@@ -97,27 +114,40 @@ export default function PortalPage({ section }: { section: Section }) {
     }
   }
 
-  async function toggleBroker(provider: string, connected: boolean) {
+  async function connectBroker(provider: string) {
     setBusy(true);
     setError("");
     try {
-      if (connected) await api("/broker/disconnect", json({}));
-      else await api("/broker/connect", json({ provider }));
-      await load();
-      setMessage(connected ? "Mock broker disconnected." : "Mock paper broker connected.");
+      const result = await api<{ authorization_url: string }>(`/broker/${provider}/connect`, json({}));
+      window.location.assign(result.authorization_url);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Unable to update the paper broker.");
+      setError(err instanceof Error ? err.message : "Unable to start broker authorization.");
     } finally {
       setBusy(false);
     }
   }
 
-  async function syncBroker() {
+  async function toggleMockBroker(connected: boolean) {
     setBusy(true);
     setError("");
     try {
-      const result = await api<BrokerSnapshot>("/broker/sync", json({}));
-      setBrokerSnapshot(result);
+      if (connected) await api("/broker/disconnect", json({}));
+      else await api("/broker/connect", json({ provider: "mock" }));
+      await load();
+      setMessage(connected ? "Mock broker disconnected." : "Mock paper broker connected.");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Unable to update the mock broker.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function syncMockBroker() {
+    setBusy(true);
+    setError("");
+    try {
+      const result = await api<MockBrokerSnapshot>("/broker/sync", json({}));
+      setMockBrokerSnapshot(result);
       await load();
       setMessage("Mock paper account synchronized.");
     } catch (err) {
@@ -127,7 +157,7 @@ export default function PortalPage({ section }: { section: Section }) {
     }
   }
 
-  async function checkBrokerHealth() {
+  async function checkMockBrokerHealth() {
     setBusy(true);
     setError("");
     try {
@@ -136,6 +166,52 @@ export default function PortalPage({ section }: { section: Section }) {
       setMessage(`Mock broker health: ${result.status}.`);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Unable to check the mock broker connection.");
+      await load();
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function disconnectBroker(provider: string) {
+    setBusy(true);
+    setError("");
+    try {
+      await api(`/broker/${provider}/disconnect`, json({}));
+      setBrokerSnapshot(null);
+      await load();
+      setMessage(`${provider} disconnected. The locally stored token was deleted; revoke the application from your broker account if provider-side revocation is required.`);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Unable to disconnect the broker.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function syncBroker(provider: string) {
+    setBusy(true);
+    setError("");
+    try {
+      const result = await api<BrokerSnapshot>(`/broker/${provider}/sync`, json({}));
+      setBrokerSnapshot(result);
+      setSnapshotProvider(provider);
+      await load();
+      setMessage(`${provider} account data synchronized.`);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Unable to synchronize the broker account.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function checkBrokerHealth(provider: string) {
+    setBusy(true);
+    setError("");
+    try {
+      const result = await api<{ status: string }>(`/broker/${provider}/health`);
+      await load();
+      setMessage(`${provider} broker health: ${result.status}.`);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Unable to check the broker connection.");
       await load();
     } finally {
       setBusy(false);
@@ -216,22 +292,43 @@ export default function PortalPage({ section }: { section: Section }) {
         <section className="portal-card"><h2>Recent login history</h2>{security?.login_history.length ? security.login_history.map(entry => <div className="session-row" key={entry.id}><div><strong>{new Date(entry.created_at).toLocaleString()}</strong><small>{entry.user_agent || "Unknown device"} · {entry.ip_address || "IP unavailable"}</small></div><span className="current-session">Successful</span></div>) : <p>No recent successful sign-ins found.</p>}</section>
       </div>}
       {section === "brokers" && <div className="portal-stack">
-        <section className="portal-card"><h2>Broker connections</h2><p>Only the local mock broker is available. Zerodha, Dhan and FYERS are listed for planning and do not accept credentials or connect to external services. Live order placement is disabled.</p>
+        {brokerProviders.some(provider => provider.id === "mock") ? <div className="portal-stack">
+          <section className="portal-card"><h2>Broker connections</h2><p>Only the local mock broker is available. Zerodha, Dhan and FYERS are listed for planning and do not accept credentials or connect to external services. Live order placement is disabled.</p>
+            {brokerProviders.map(provider => {
+              const connection = brokers.find(item => item.provider === provider.id);
+              return <div className="broker-row" key={provider.id}>
+                <div><strong>{provider.name}</strong><small>{provider.available ? "NSE/BSE paper simulation · INR · Equities and ETFs" : "Not implemented · No credentials collected"}</small>{connection && <small>Status: {connection.status}{connection.last_health_check_at ? ` · Health checked ${new Date(connection.last_health_check_at).toLocaleString()}` : ""}{connection.last_synced_at ? ` · Last sync ${new Date(connection.last_synced_at).toLocaleString()}` : ""}{connection.last_sync_error ? ` · ${connection.last_sync_error.replaceAll("_", " ")}` : ""}</small>}</div>
+                <span className={connection?.connected ? "badge-verified" : "badge-pending"}>{connection?.status || "unavailable"}</span>
+                {provider.available && <div className="inline">
+                  {connection?.connected && <button className="portal-secondary" disabled={busy} onClick={() => void syncMockBroker()}>{busy ? "Syncing…" : "Sync paper data"}</button>}
+                  {connection?.connected && <button className="portal-secondary" disabled={busy} onClick={() => void checkMockBrokerHealth()}>Check health</button>}
+                  <button className="portal-secondary" disabled={busy} onClick={() => void toggleMockBroker(Boolean(connection?.connected))}>{connection?.connected ? "Disconnect" : "Connect mock broker"}</button>
+                </div>}
+              </div>;
+            })}
+            <p className="portal-readonly">Mock authorization is local and expires after eight hours. No access token or broker credential is sent to or stored in the browser.</p>
+          </section>
+          {mockBrokerSnapshot && <section className="portal-card"><h2>Last mock synchronization</h2><p>Read-only mirror of this account’s paper ledger · {new Date(mockBrokerSnapshot.synced_at).toLocaleString()}</p><div className="portal-readonly"><span>Cash</span><strong>{mockBrokerSnapshot.account.currency} {mockBrokerSnapshot.account.cash}</strong></div><div className="portal-readonly"><span>Equity</span><strong>{mockBrokerSnapshot.account.currency} {mockBrokerSnapshot.account.equity}</strong></div><div className="portal-readonly"><span>Invested</span><strong>{mockBrokerSnapshot.account.currency} {mockBrokerSnapshot.account.invested}</strong></div><h3>Holdings and positions</h3>{mockBrokerSnapshot.positions.length ? mockBrokerSnapshot.positions.map(item => <div className="session-row" key={`${item.exchange}:${item.symbol}`}><div><strong>{item.exchange}:{item.symbol}</strong><small>{item.quantity} shares · P&amp;L {mockBrokerSnapshot.account.currency} {item.unrealized_pnl}</small></div></div>) : <p>No paper holdings yet.</p>}<h3>Paper order statuses</h3>{mockBrokerSnapshot.orders.slice(0, 10).map(item => <div className="session-row" key={item.order_id}><strong>{item.exchange}:{item.symbol}</strong><span className="current-session">{item.status}</span></div>)}</section>}
+        </div> : <div className="portal-stack">
+        <section className="portal-card"><h2>Broker connections</h2><p>Production connections are read-only: account balances, holdings, positions, and broker order statuses. This application does not submit live orders. Broker credentials and access tokens stay on the server.</p>
           {brokerProviders.map(provider => {
             const connection = brokers.find(item => item.provider === provider.id);
             return <div className="broker-row" key={provider.id}>
-              <div><strong>{provider.name}</strong><small>{provider.available ? "NSE/BSE paper simulation · INR · Equities and ETFs" : "Not implemented · No credentials collected"}</small>{connection && <small>Status: {connection.status}{connection.last_health_check_at ? ` · Health checked ${new Date(connection.last_health_check_at).toLocaleString()}` : ""}{connection.last_synced_at ? ` · Last sync ${new Date(connection.last_synced_at).toLocaleString()}` : ""}{connection.last_sync_error ? ` · ${connection.last_sync_error.replaceAll("_", " ")}` : ""}</small>}</div>
-              <span className={connection?.connected ? "badge-verified" : "badge-pending"}>{connection?.status || "unavailable"}</span>
+              <div><strong>{provider.name}</strong><small>{provider.available ? "Read-only production account integration · INR" : "Not configured on this server"}</small>{connection && <small>Status: {connection.status}{connection.last_health_check_at ? ` · Health checked ${new Date(connection.last_health_check_at).toLocaleString()}` : ""}{connection.last_synced_at ? ` · Last sync ${new Date(connection.last_synced_at).toLocaleString()}` : ""}{connection.last_sync_error ? ` · ${connection.last_sync_error.replaceAll("_", " ")}` : ""}</small>}</div>
+              <span className={connection?.connected ? "badge-verified" : "badge-pending"}>{connection?.status || (provider.available ? "disconnected" : "unavailable")}</span>
               {provider.available && <div className="inline">
-                {connection?.connected && <button className="portal-secondary" disabled={busy} onClick={() => void syncBroker()}>{busy ? "Syncing…" : "Sync paper data"}</button>}
-                {connection?.connected && <button className="portal-secondary" disabled={busy} onClick={() => void checkBrokerHealth()}>Check health</button>}
-                <button className="portal-secondary" disabled={busy} onClick={() => void toggleBroker(provider.id, Boolean(connection?.connected))}>{connection?.connected ? "Disconnect" : "Connect mock broker"}</button>
+                {connection?.connected && <button className="portal-secondary" disabled={busy} onClick={() => void syncBroker(provider.id)}>{busy ? "Syncing…" : "Sync account data"}</button>}
+                {connection?.connected && <button className="portal-secondary" disabled={busy} onClick={() => void checkBrokerHealth(provider.id)}>Check health</button>}
+                {!connection?.connected && <button className="portal-secondary" disabled={busy} onClick={() => void connectBroker(provider.id)}>{connection?.status === "expired" ? "Reconnect account" : "Connect account"}</button>}
               </div>}
+              {!provider.available && connection && connection.status !== "disconnected" && <button className="portal-secondary" disabled={busy} onClick={() => void disconnectBroker(provider.id)}>Delete stored connection</button>}
+              {provider.available && connection?.connected && <button className="portal-secondary" disabled={busy} onClick={() => void disconnectBroker(provider.id)}>Disconnect</button>}
             </div>;
           })}
-          <p className="portal-readonly">Mock authorization is local and expires after eight hours. No access token or broker credential is sent to or stored in the browser.</p>
+          <p className="portal-readonly">A disconnect deletes the server-stored token. If the provider does not expose a verified revoke endpoint, revoke the app separately from your broker account. Connection availability depends on server-side credentials and provider approval.</p>
         </section>
-        {brokerSnapshot && <section className="portal-card"><h2>Last mock synchronization</h2><p>Read-only mirror of this account’s paper ledger · {new Date(brokerSnapshot.synced_at).toLocaleString()}</p><div className="portal-readonly"><span>Cash</span><strong>{brokerSnapshot.account.currency} {brokerSnapshot.account.cash}</strong></div><div className="portal-readonly"><span>Equity</span><strong>{brokerSnapshot.account.currency} {brokerSnapshot.account.equity}</strong></div><div className="portal-readonly"><span>Invested</span><strong>{brokerSnapshot.account.currency} {brokerSnapshot.account.invested}</strong></div><h3>Holdings and positions</h3>{brokerSnapshot.positions.length ? brokerSnapshot.positions.map(item => <div className="session-row" key={`${item.exchange}:${item.symbol}`}><div><strong>{item.exchange}:{item.symbol}</strong><small>{item.quantity} shares · P&amp;L {brokerSnapshot.account.currency} {item.unrealized_pnl}</small></div></div>) : <p>No paper holdings yet.</p>}<h3>Paper order statuses</h3>{brokerSnapshot.orders.slice(0, 10).map(item => <div className="session-row" key={item.order_id}><strong>{item.exchange}:{item.symbol}</strong><span className="current-session">{item.status}</span></div>)}</section>}
+        {brokerSnapshot && <section className="portal-card"><h2>{snapshotProvider} account snapshot</h2><p>Read-only provider data · {new Date(brokerSnapshot.fetched_at).toLocaleString()}</p>{brokerSnapshot.account.account_name && <div className="portal-readonly"><span>Account</span><strong>{brokerSnapshot.account.account_name}</strong></div>}<div className="portal-readonly"><span>Available balance</span><strong>{brokerSnapshot.account.currency} {brokerSnapshot.account.available_balance}</strong></div>{brokerSnapshot.account.equity && <div className="portal-readonly"><span>Equity</span><strong>{brokerSnapshot.account.currency} {brokerSnapshot.account.equity}</strong></div>}<h3>Holdings</h3>{brokerSnapshot.holdings.length ? brokerSnapshot.holdings.map((item, index) => <div className="session-row" key={`${item.exchange}:${item.symbol}:${index}`}><div><strong>{item.exchange || "Exchange"}:{item.symbol || "Instrument"}</strong><small>{item.quantity} units · average {brokerSnapshot.account.currency} {item.average_price} · last {brokerSnapshot.account.currency} {item.last_price}</small></div></div>) : <p>No holdings reported.</p>}<h3>Positions</h3>{brokerSnapshot.positions.length ? brokerSnapshot.positions.map((item, index) => <div className="session-row" key={`${item.exchange}:${item.symbol}:${index}`}><div><strong>{item.exchange || "Exchange"}:{item.symbol || "Instrument"}</strong><small>{item.quantity} units{item.unrealized_pnl ? ` · P&L ${brokerSnapshot.account.currency} ${item.unrealized_pnl}` : ""}</small></div></div>) : <p>No positions reported.</p>}<h3>Recent order statuses</h3>{brokerSnapshot.orders.slice(0, 10).map(item => <div className="session-row" key={item.order_id}><strong>{item.exchange}:{item.symbol}</strong><span className="current-session">{item.status}</span></div>)}</section>}
+        </div>}
       </div>}
     </div>
   </main>;

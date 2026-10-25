@@ -90,7 +90,8 @@ class BrokerConnection(Base):
     user_id: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("user.id"), index=True)
     provider: Mapped[str] = mapped_column(String(30))
     status: Mapped[str] = mapped_column(String(20), default="disconnected")
-    account_label: Mapped[str] = mapped_column(String(100), default="GNK Mock Paper")
+    account_label: Mapped[str] = mapped_column(String(100), default="Broker account")
+    provider_account_id: Mapped[str | None] = mapped_column(String(100), nullable=True)
     encrypted_access_token: Mapped[str | None] = mapped_column(Text, nullable=True)
     credential_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     last_health_check_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
@@ -99,6 +100,17 @@ class BrokerConnection(Base):
     last_sync_error: Mapped[str | None] = mapped_column(String(120), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
+
+
+class BrokerAuthorizationAttempt(Base):
+    __tablename__ = "broker_authorization_attempt"
+    state_hash: Mapped[str] = mapped_column(String(64), primary_key=True)
+    user_id: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("user.id"), index=True)
+    provider: Mapped[str] = mapped_column(String(30))
+    provider_request_id: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    consumed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
 class AuditLog(Base):

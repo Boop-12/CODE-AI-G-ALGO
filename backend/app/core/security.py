@@ -66,6 +66,21 @@ def decrypt_sensitive_value(encrypted: str) -> str:
     return _mfa_cipher().decrypt(encrypted.encode()).decode()
 
 
+def _broker_token_cipher() -> Fernet:
+    key = settings.BROKER_TOKEN_ENCRYPTION_KEY
+    if not key:
+        raise RuntimeError("BROKER_TOKEN_ENCRYPTION_KEY is required for broker token storage")
+    return Fernet(key.encode())
+
+
+def encrypt_broker_token(token: str) -> str:
+    return _broker_token_cipher().encrypt(token.encode()).decode()
+
+
+def decrypt_broker_token(encrypted: str) -> str:
+    return _broker_token_cipher().decrypt(encrypted.encode()).decode()
+
+
 def generate_totp_secret() -> str:
     return base64.b32encode(secrets.token_bytes(20)).decode().rstrip("=")
 

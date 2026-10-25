@@ -12,6 +12,7 @@ from sqlalchemy.orm import selectinload
 
 from app.api.deps import get_admin, get_current_user, get_super_admin
 from app.brokers import mock_broker
+from app.broker_providers import PROVIDERS
 from app.core.config import settings
 from app.core.mailer import action_url, deliver_link
 from app.core.security import (
@@ -509,6 +510,56 @@ async def broker_settings(
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
+    if settings.ENVIRONMENT == "production":
+        connections = list((await db.execute(select(BrokerConnection).where(
+            BrokerConnection.user_id == user.id,
+            BrokerConnection.provider.in_(tuple(PROVIDERS)),
+        ))).scalars())
+        by_provider = {connection.provider: connection for connection in connections}
+        providers = [
+            {"id": provider, "name": provider_name, "available": PROVIDERS[provider].configured(),
+             "capabilities": {
+                 "account_summary": PROVIDERS[provider].capabilities.account_summary,
+                 "holdings": PROVIDERS[provider].capabilities.holdings,
+                 "positions": PROVIDERS[provider].capabilities.positions,
+                 "order_status": PROVIDERS[provider].capabilities.order_status,
+                 "order_placement": PROVIDERS[provider].capabilities.order_placement,
+             }}
+            for provider, provider_name in (
+                ("zerodha", "Zerodha"), ("dhan", "Dhan"), ("fyers", "FYERS")
+            )
+        ]
+        connection_views = []
+        now = datetime.now(timezone.utc)
+        for provider in ("zerodha", "dhan", "fyers"):
+            connection = by_provider.get(provider)
+            status = connection.status if connection else "disconnected"
+            available = PROVIDERS[provider].configured()
+            if not available and status == "connected":
+                status = "unavailable"
+            expires_at = connection.credential_expires_at if connection else None
+            if status == "connected" and expires_at and _as_utc(expires_at) <= now:
+                status = "expired"
+                connection.status = "expired"
+                connection.encrypted_access_token = None
+                connection.last_sync_status = "expired"
+                connection.last_sync_error = "authorization_expired"
+                audit(db, user.id, "broker.authorization_expired", provider)
+            connection_views.append({
+                "provider": provider,
+                "label": connection.account_label if connection else f"{provider.title()} account",
+                "connected": status == "connected" and available,
+                "status": status,
+                "mode": "live_read_only",
+                "expires_at": expires_at,
+                "last_health_check_at": connection.last_health_check_at if connection else None,
+                "last_synced_at": connection.last_synced_at if connection else None,
+                "last_sync_status": connection.last_sync_status if connection else None,
+                "last_sync_error": connection.last_sync_error if connection else None,
+            })
+        await db.commit()
+        return {"providers": providers, "connections": connection_views}
+
     account = await db.get(Account, user.id)
     connection = (await db.execute(select(BrokerConnection).where(
         BrokerConnection.user_id == user.id, BrokerConnection.provider == "mock"

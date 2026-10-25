@@ -9,6 +9,7 @@ from app.core.config import settings
 from app.db.session import AsyncSessionLocal
 from app.api.routes import router
 from app.api.account import router as account_router
+from app.api.broker_connections import router as broker_connections_router
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
 logger = logging.getLogger("gnkalgo")
@@ -51,3 +52,4 @@ async def ready():
 
 app.include_router(router, prefix="/api/v1")
 app.include_router(account_router, prefix="/api/v1")
+app.include_router(broker_connections_router, prefix="/api/v1/broker")
