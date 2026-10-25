@@ -15,5 +15,6 @@
 *.pem
 *.key
 deploy/tls/
+/tls/
 backups/
 .DS_Store

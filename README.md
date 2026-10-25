@@ -59,3 +59,5 @@ Tests use an isolated SQLite test database by default. GNK_TEST_DATABASE_URL opt
 - docs/ORACLE_UBUNTU_DEPLOYMENT.md and docs/VALIDATION.md.
 
 No default password, broker credential or payment credential is bundled. Never commit .env, private keys, runtime databases or backups. The application ports/database remain internal in the deployment stack. Oracle deployment and public domain verification require functioning server access and domain ownership.
+
+For server start/stop/rebuild/update and certificate renewal, see [service commands](docs/SERVICE_COMMANDS.md).

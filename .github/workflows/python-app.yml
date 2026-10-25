@@ -38,6 +38,8 @@ jobs:
           alembic downgrade base
           alembic upgrade head
       - run: python -m pytest tests -q
+      - name: Verify production TLS preflight checks
+        run: python -m unittest discover -s ../deploy/tests -v
   frontend:
     runs-on: ubuntu-latest
     defaults:

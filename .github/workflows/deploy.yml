@@ -32,8 +32,9 @@ jobs:
           ssh -i "$RUNNER_TEMP/gnk-ssh/key" -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$RUNNER_TEMP/gnk-ssh/known_hosts" ubuntu@130.210.34.12 bash -s -- "$COMMIT" <<'REMOTE'
           set -euo pipefail
           revision="$1"
-          cd /opt/gnkalgo/app
-          test -z "$(git status --porcelain)"
+          cd /opt/CODE-AI-G-ALGO
+          git diff --quiet
+          git diff --cached --quiet
           bash deploy/backup.sh
           git fetch origin main
           git cat-file -e "$revision^{commit}"
