@@ -35,6 +35,7 @@ from app.models import (
 )
 
 router = APIRouter()
+SUPPORTED_ROLE_NAMES = {"customer", "research_analyst", "support_staff", "admin", "super_admin"}
 
 
 def audit(db: AsyncSession, user_id: uuid.UUID, action: str, detail: str = "") -> None:
@@ -425,8 +426,7 @@ async def update_user_roles(
     admin: User = Depends(get_super_admin),
     db: AsyncSession = Depends(get_db),
 ):
-    allowed = {"admin", "super_admin"}
-    if len(set(body.roles)) != len(body.roles) or not set(body.roles).issubset(allowed):
+    if len(set(body.roles)) != len(body.roles) or not set(body.roles).issubset(SUPPORTED_ROLE_NAMES):
         raise HTTPException(422, "One or more roles are not supported")
     user = (await db.execute(select(User).options(selectinload(User.roles)).where(User.id == user_id))).scalar_one_or_none()
     if not user:

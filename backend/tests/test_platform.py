@@ -255,6 +255,29 @@ def test_super_admin_can_manage_roles_and_suspend_accounts(client):
     other.close()
 
 
+def test_super_admin_can_assign_support_and_research_roles(client):
+    admin = register(client, "ops-admin@example.com")
+    other = TestClient(app, headers={"Origin": "http://testserver"})
+    register(other, "analyst-target@example.com")
+
+    async def promote():
+        async with AsyncSessionLocal() as db:
+            from sqlalchemy.orm import selectinload
+            user = (await db.execute(select(User).options(selectinload(User.roles)).where(User.id == uuid.UUID(admin["id"])))).scalar_one()
+            user.roles.append(Role(name="super_admin"))
+            await db.commit()
+    asyncio.run(promote())
+
+    secret = client.post("/api/v1/auth/mfa/setup", json={}).json()["secret"]
+    assert client.post("/api/v1/auth/mfa/verify", json={"code": totp_code(secret)}).status_code == 200
+    listing = client.get("/api/v1/admin/users?q=analyst-target&page=1&page_size=1").json()
+    target_id = listing["items"][0]["id"]
+    response = client.patch(f"/api/v1/admin/users/{target_id}/roles", json={"roles": ["research_analyst", "support_staff"]})
+    assert response.status_code == 200
+    assert set(response.json()["roles"]) == {"research_analyst", "support_staff"}
+    other.close()
+
+
 def test_email_verification_profile_settings_and_password_reset(client):
     registered = client.post("/api/v1/auth/register", json={
         "name": "Test Trader",
