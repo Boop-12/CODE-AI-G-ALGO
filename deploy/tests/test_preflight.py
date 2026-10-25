@@ -37,7 +37,7 @@ class EnvironmentTests(unittest.TestCase):
 class CertificateTests(unittest.TestCase):
     def certificate(self, directory, name="gnkalgo.com", stem="origin"):
         directory = Path(directory)
-        subprocess.run([OPENSSL, "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "7", "-subj", f"/CN={name}", "-addext", f"subjectAltName=DNS:{name},DNS:www.{name}", "-keyout", str(directory / f"{stem}.key"), "-out", str(directory / f"{stem}.pem")], check=True, capture_output=True)
+        subprocess.run([OPENSSL, "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "7", "-subj", f"/CN={name}", "-addext", f"subjectAltName=DNS:{name},DNS:www.{name},DNS:app.{name}", "-keyout", str(directory / f"{stem}.key"), "-out", str(directory / f"{stem}.pem")], check=True, capture_output=True)
 
     def test_valid_chain_hostname_and_key(self):
         with tempfile.TemporaryDirectory() as directory:

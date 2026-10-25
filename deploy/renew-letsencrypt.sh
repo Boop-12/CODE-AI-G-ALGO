@@ -8,6 +8,7 @@ tls_dir=/opt/gnkalgo/tls
 test -d "$tls_dir"
 openssl x509 -in "$lineage/fullchain.pem" -noout -checkhost gnkalgo.com >/dev/null
 openssl x509 -in "$lineage/fullchain.pem" -noout -checkhost www.gnkalgo.com >/dev/null
+openssl x509 -in "$lineage/fullchain.pem" -noout -checkhost app.gnkalgo.com >/dev/null
 owner_uid=$(stat -c %u "$tls_dir")
 owner_gid=$(stat -c %g "$tls_dir")
 install -o "$owner_uid" -g "$owner_gid" -m 644 "$lineage/fullchain.pem" "$tls_dir/origin.pem"

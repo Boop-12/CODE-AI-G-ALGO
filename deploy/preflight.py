@@ -32,7 +32,7 @@ def validate_tls(directory, ca_file, *, executable="openssl"):
         openssl(["x509", "-in", str(certificate), "-noout", "-checkend", "86400"], executable=executable)
     except PreflightError:
         raise PreflightError("Origin certificate is invalid or expires within 24 hours") from None
-    for hostname in ("gnkalgo.com", "www.gnkalgo.com"):
+    for hostname in ("gnkalgo.com", "www.gnkalgo.com", "app.gnkalgo.com"):
         try:
             openssl(["verify", "-purpose", "sslserver", "-CAfile", str(ca_file), "-untrusted", str(certificate), "-verify_hostname", hostname, str(certificate)], executable=executable)
         except PreflightError:
@@ -84,7 +84,7 @@ def main():
     if "--print-ca" in sys.argv:
         print(ca_file.resolve())
         return
-    print("Production preflight passed: environment, certificate expiry, both hostnames, CA trust and matching private key.")
+    print("Production preflight passed: environment, certificate expiry, all three hostnames, CA trust and matching private key.")
 
 
 if __name__ == "__main__":

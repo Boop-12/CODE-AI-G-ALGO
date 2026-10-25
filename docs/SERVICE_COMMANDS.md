@@ -68,7 +68,7 @@ For a complete update prefer service.sh update so backups, TLS checks, builds an
 
 ## Certificate setup
 
-Nginx expects origin.pem and origin.key inside TLS_DIR. A CSR is a certificate request, not a signed certificate. This host already has a publicly trusted Let's Encrypt certificate at /etc/letsencrypt/live/gnkalgo.com covering gnkalgo.com and www.gnkalgo.com. A publicly trusted origin certificate also works with Cloudflare Full (strict); a separate Cloudflare Origin CA certificate is not required.
+Nginx expects origin.pem and origin.key inside TLS_DIR. A CSR is a certificate request, not a signed certificate. This host already has a publicly trusted Let's Encrypt certificate at /etc/letsencrypt/live/gnkalgo.com now covering gnkalgo.com, www.gnkalgo.com and app.gnkalgo.com. The app hostname redirects to the canonical gnkalgo.com site. A publicly trusted origin certificate also works with Cloudflare Full (strict); a separate Cloudflare Origin CA certificate is not required.
 
 The Docker TLS copy lives under /opt/gnkalgo/tls. The private key stays server-side with mode 600; TLS_DIR is private to the deploy account. For a Cloudflare-issued origin certificate, also provide its CA root bundle and set TLS_CA_FILE or ORIGIN_CA_FILE. Otherwise the preflight uses the Ubuntu system CA bundle.
 
@@ -81,13 +81,13 @@ systemctl status certbot.timer --no-pager
 sudo certbot renew --dry-run
 ```
 
-Do not run systemctl start nginx for this Docker deployment. The obsolete host service/configuration can otherwise conflict with Docker on ports 80/443. Root and www certificate coverage does not imply coverage for app.gnkalgo.com; check certificate SANs before adding a hostname.
+Do not run systemctl start nginx for this Docker deployment. The obsolete host service/configuration can otherwise conflict with Docker on ports 80/443. The current certificate includes the app hostname; the preflight and renewal hook check coverage for all three hostnames.
 
 ## Diagnosing Cloudflare 521
 
 Observed 25 October 2026: api/web/PostgreSQL healthy, migrate Exited (0), nginx Restarting (1), no origin HTTP/HTTPS listener. Nginx logged cannot load certificate /etc/nginx/tls/origin.pem. Certificate files were missing from the actual bind mount, while an unused project tls folder only contained a key/CSR/CA file.
 
-Recovery: verify existing Let's Encrypt chain; install its fullchain and matching key at the configured TLS_DIR; validate Nginx using a one-off container; force-recreate only Nginx to refresh the bind mount. Public root, www, login and API readiness then returned 200. A read-only config warning from the container entrypoint is benign; the certificate [emerg] message is the startup failure.
+Recovery: verify existing Let's Encrypt chain; install its fullchain and matching key at the configured TLS_DIR; validate Nginx using a one-off container; force-recreate only Nginx to refresh the bind mount. Public root, www, login and API readiness then returned 200. The separate app hostname initially returned 526; the existing Let's Encrypt certificate was expanded to include it. A read-only config warning from the container entrypoint is benign; the certificate [emerg] message is the startup failure.
 
 ```bash
 $DC ps -a
