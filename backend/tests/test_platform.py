@@ -18,7 +18,7 @@ os.environ["ALLOWED_ORIGINS"] = "http://testserver"
 
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import select
+from sqlalchemy import select, text
 from app.main import app
 from app.db.session import engine, Base, AsyncSessionLocal
 from app.models import User, Role, Session, AuditLog, Position
@@ -29,6 +29,7 @@ from app.core.security import hash_token
 def database():
     async def reset():
         async with engine.begin() as connection:
+            await connection.execute(text("DROP TABLE IF EXISTS users"))
             await connection.run_sync(Base.metadata.drop_all)
             await connection.run_sync(Base.metadata.create_all)
         await engine.dispose()
@@ -399,3 +400,84 @@ def test_mfa_enrollment_revokes_other_password_only_sessions(client):
     assert client.get("/api/v1/admin/overview").status_code == 200
     assert other.get("/api/v1/me").status_code == 401
     other.close()
+
+
+
+def test_single_database_legacy_import_is_additive_idempotent_and_unprivileged(client):
+    from app.import_legacy_accounts import import_accounts
+    from app.models import Account, LegacyAccountImport
+    from app.core.security import get_password_hash, verify_password
+    from sqlalchemy import text, func
+    existing = register(client, "existing-target@example.com")
+    password = "Legacy-password-123!"
+    stored_hash = get_password_hash(password)
+
+    async def run():
+        async with AsyncSessionLocal() as db:
+            await db.execute(text("CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT, email TEXT, password_hash TEXT, is_active BOOLEAN, created_at TEXT)"))
+            await db.execute(text("INSERT INTO users VALUES (42, 'Legacy User', 'legacy-user@example.com', :hash, true, '2025-01-01')"), {"hash": stored_hash})
+            await db.commit()
+            preview = await import_accounts(db)
+            assert preview["eligible"] == 1 and preview["imported"] == 0
+            assert (await db.execute(select(func.count(User.id)))).scalar_one() == 1
+            await db.rollback()
+            result = await import_accounts(db, apply=True)
+            await db.commit()
+            assert result["imported"] == 1
+            again = await import_accounts(db, apply=True)
+            await db.commit()
+            assert again["already_imported"] == 1 and again["imported"] == 0
+            legacy = (await db.execute(select(User).where(User.email == "legacy-user@example.com"))).scalar_one()
+            assert verify_password(password, legacy.hashed_password)
+            assert legacy.email_verified is False and legacy.mfa_enabled is False
+            assert legacy.created_at.year == 2025
+            assert await db.get(Account, legacy.id) is not None
+            assert (await db.execute(select(LegacyAccountImport))).scalar_one().user_id == legacy.id
+            assert (await db.execute(text("SELECT password_hash FROM users WHERE id=42"))).scalar_one() == stored_hash
+            assert await db.get(User, uuid.UUID(existing["id"])) is not None
+    asyncio.run(run())
+    client.post("/api/v1/auth/logout")
+    result = client.post("/api/v1/auth/login", json={"email": "legacy-user@example.com", "password": password})
+    assert result.status_code == 200 and result.json()["roles"] == []
+    assert client.get("/api/v1/admin/users").status_code == 403
+
+
+def test_legacy_import_collision_refuses_all_writes(client):
+    from app.import_legacy_accounts import ImportConflict, import_accounts
+    from app.core.security import get_password_hash
+    from sqlalchemy import text, func
+    register(client, "collision@example.com")
+
+    async def run():
+        async with AsyncSessionLocal() as db:
+            await db.execute(text("CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT, email TEXT, password_hash TEXT, is_active BOOLEAN, created_at TEXT)"))
+            for identifier, email in [(1, "new-source@example.com"), (2, "COLLISION@example.com")]:
+                await db.execute(text("INSERT INTO users VALUES (:id, 'Source', :email, :hash, true, '2025-01-01')"), {"id": identifier, "email": email, "hash": get_password_hash("Legacy-password-123!")})
+            await db.commit()
+            preview = await import_accounts(db)
+            assert preview["email_conflicts"] == 1
+            with pytest.raises(ImportConflict):
+                await import_accounts(db, apply=True)
+            await db.rollback()
+            assert (await db.execute(select(func.count(User.id)))).scalar_one() == 1
+            assert (await db.execute(text("SELECT COUNT(*) FROM users"))).scalar_one() == 2
+    asyncio.run(run())
+
+
+
+def test_legacy_import_invalid_password_refuses_writes(client):
+    from app.import_legacy_accounts import ImportConflict, import_accounts
+    from sqlalchemy import text, func
+
+    async def run():
+        async with AsyncSessionLocal() as db:
+            await db.execute(text("CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT, email TEXT, password_hash TEXT, is_active BOOLEAN, created_at TEXT)"))
+            await db.execute(text("INSERT INTO users VALUES (1, 'Source', 'invalid-hash@example.com', 'plaintext-is-forbidden', true, '2025-01-01')"))
+            await db.commit()
+            preview = await import_accounts(db)
+            assert preview["invalid_records"] == 1
+            with pytest.raises(ImportConflict):
+                await import_accounts(db, apply=True)
+            await db.rollback()
+            assert (await db.execute(select(func.count(User.id)))).scalar_one() == 0
+    asyncio.run(run())
