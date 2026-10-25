@@ -2,7 +2,7 @@
 
 Target domain: **gnkalgo.com**. Origin: **130.210.34.12**. Local folder: **D:\CODE-AI-G-ALGO**. Repository: https://github.com/Boop-12/CODE-AI-G-ALGO.git .
 
-Status: code/configuration prepared for the paper MVP. SSH to ubuntu@130.210.34.12 with the existing local gnkalgo_cursor key returned Permission denied (publickey). No server changes, DNS changes, certificates, GitHub secrets or public deployment are claimed. Obtain the actual instance SSH key/username first; keep private key contents out of chats and Git.
+Status (25 October 2026): deployed on Oracle Ubuntu at /opt/CODE-AI-G-ALGO. Public root/www HTTPS and API readiness were verified; app.gnkalgo.com redirects to the canonical domain. Docker Nginx uses the renewed Let's Encrypt certificate for all three names; Certbot renewal simulation passed. Use SERVICE_COMMANDS.md for this existing installation's start/stop/rebuild/update commands. The setup instructions below also describe a fresh-install example layout.
 
 ## 1. Test on the Windows laptop
 

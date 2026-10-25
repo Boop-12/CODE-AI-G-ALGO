@@ -10,7 +10,7 @@ compose=(docker compose -f docker-compose.yml -f docker-compose.production.yml)
 "${compose[@]}" up -d postgres
 # A fresh one-off migration runs on EVERY deployment, even if 'migrate' previously exited.
 "${compose[@]}" run --rm migrate
-"${compose[@]}" up -d --wait --wait-timeout 180 api web
+"${compose[@]}" up -d --no-deps --force-recreate --wait --wait-timeout 180 api web
 # Test the new bind-mounted configuration before replacing the running proxy.
 "${compose[@]}" run --rm --no-deps nginx nginx -t
 # Recreate so new config file inodes and changed upstream container IPs are loaded.

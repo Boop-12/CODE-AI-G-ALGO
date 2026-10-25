@@ -24,6 +24,7 @@ Inspected on 24 October 2026. Starting folder was not a Git checkout. Existing N
 - [x] Full admin user search/pagination, account activation/suspension, role assignment, audit review and persisted registration settings.
 - [ ] SMTP provider setup, production security review, operational alerting, off-server backups and tested disaster recovery.
 - [x] GitHub CI: 16 PostgreSQL tests including concurrency, migration cycle, frontend checks and Docker startup/API smoke checks.
-- [ ] Full automated browser end-to-end tests, live Oracle deployment and public DNS/TLS checks.
+- [x] Live Oracle deployment, healthy Docker services, public root/www HTTPS, app canonical redirect, certificate issuance and renewal dry run.
+- [ ] Full automated browser end-to-end tests and off-server recovery drill.
 
 This is a functional paper-trading MVP, not a finished regulated live-trading product. No live execution route exists. Fixed quotes mean actual market performance cannot be inferred. Strategy activation records configuration and does not start automated trades. Paper sessions intentionally allow practice outside market hours. Daily loss resets at UTC midnight in this MVP.
