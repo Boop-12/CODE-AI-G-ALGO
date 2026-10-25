@@ -481,3 +481,96 @@ def test_legacy_import_invalid_password_refuses_writes(client):
             await db.rollback()
             assert (await db.execute(select(func.count(User.id)))).scalar_one() == 0
     asyncio.run(run())
+
+
+def test_admin_bootstrap_confirmed_password_round_trip(client, monkeypatch):
+    from app.bootstrap import main
+    inputs = iter(["  BOOTSTRAP.ADMIN@EXAMPLE.COM  ", "Bootstrap Admin"])
+    passwords = iter(["Confirmed-admin-password-123!", "Confirmed-admin-password-123!"])
+    monkeypatch.setattr("builtins.input", lambda _: next(inputs))
+    monkeypatch.setattr("getpass.getpass", lambda _: next(passwords))
+    asyncio.run(main([]))
+    result = client.post("/api/v1/auth/login", json={"email": "bootstrap.admin@example.com", "password": "Confirmed-admin-password-123!"})
+    assert result.status_code == 200, result.text
+    assert result.json()["roles"] == ["admin"]
+    assert result.json()["mfa_enabled"] is False
+    assert client.get("/api/v1/admin/overview").status_code == 403  # Enrollment is still required.
+
+
+def test_admin_bootstrap_rejects_mismatched_password_without_writes(client, monkeypatch):
+    from app.bootstrap import main
+    from sqlalchemy import func
+    inputs = iter(["bootstrap@example.com", "Bootstrap Admin"])
+    passwords = iter(["First-password-123!", "Different-password-123!"])
+    monkeypatch.setattr("builtins.input", lambda _: next(inputs))
+    monkeypatch.setattr("getpass.getpass", lambda _: next(passwords))
+    with pytest.raises(SystemExit, match="do not match"):
+        asyncio.run(main([]))
+    async def count_users():
+        async with AsyncSessionLocal() as db:
+            return (await db.execute(select(func.count(User.id)))).scalar_one()
+    assert asyncio.run(count_users()) == 0
+
+
+def test_admin_password_recovery_revokes_sessions_and_preserves_mfa(client):
+    from app.bootstrap import create_admin, reset_admin_password
+    from app.models import PasswordResetToken, RefreshToken
+    from app.core.security import encrypt_mfa_secret, verify_password
+    secret = "JBSWY3DPEHPK3PXP"
+    async def prepare():
+        async with AsyncSessionLocal() as db:
+            admin = await create_admin(db, "recover@example.com", "Recovery Admin", "Original-admin-password-123!")
+            admin.mfa_enabled, admin.mfa_secret = True, encrypt_mfa_secret(secret)
+            db.add(Session(user_id=admin.id, token_hash=hash_token("old-session"), expires_at=datetime.now(timezone.utc) + timedelta(hours=1)))
+            db.add(PasswordResetToken(user_id=admin.id, token=hash_token("old-reset-link"), expires_at=datetime.now(timezone.utc) + timedelta(minutes=30)))
+            db.add(RefreshToken(user_id=admin.id, token="legacy-refresh-token", expires_at=datetime.now(timezone.utc) + timedelta(hours=1)))
+            await db.commit()
+            await reset_admin_password(db, " RECOVER@EXAMPLE.COM ", "Recovered-admin-password-456!")
+            assert admin.mfa_enabled and admin.mfa_secret
+            assert [r.name for r in admin.roles] == ["admin"]
+            assert verify_password("Recovered-admin-password-456!", admin.hashed_password)
+            assert not verify_password("Original-admin-password-123!", admin.hashed_password)
+            assert list((await db.execute(select(Session).where(Session.user_id == admin.id))).scalars()) == []
+            assert (await db.execute(select(PasswordResetToken))).scalar_one().used
+            assert (await db.execute(select(RefreshToken))).scalar_one().revoked
+    asyncio.run(prepare())
+    credentials = {"email": "recover@example.com", "password": "Recovered-admin-password-456!"}
+    assert client.post("/api/v1/auth/login", json=credentials).status_code == 401
+    assert client.post("/api/v1/auth/login", json={**credentials, "mfa_code": totp_code(secret)}).status_code == 200
+
+
+def test_admin_password_recovery_cannot_promote_customer_or_reactivate_admin(client):
+    from app.bootstrap import create_admin, reset_admin_password
+    from app.core.security import verify_password
+    register(client, "customer@example.com")
+    async def run():
+        async with AsyncSessionLocal() as db:
+            with pytest.raises(SystemExit, match="not found"):
+                await reset_admin_password(db, "customer@example.com", "Replacement-password-123!")
+            await db.rollback()
+            customer = (await db.execute(select(User).where(User.email == "customer@example.com"))).scalar_one()
+            assert verify_password("A-long-test-password-123", customer.hashed_password)
+            admin = await create_admin(db, "suspended@example.com", "Suspended Admin", "Original-admin-password-123!")
+            admin.is_active = False
+            await db.commit()
+            with pytest.raises(SystemExit, match="suspended"):
+                await reset_admin_password(db, "suspended@example.com", "Replacement-password-123!")
+            assert admin.is_active is False
+            assert verify_password("Original-admin-password-123!", admin.hashed_password)
+    asyncio.run(run())
+
+
+def test_admin_bootstrap_duplicate_does_not_overwrite_and_password_limits(client):
+    from app.bootstrap import create_admin, password_digest
+    from app.core.security import verify_password
+    for password in ("too-short", "x" * 129):
+        with pytest.raises(SystemExit, match="12-128"):
+            password_digest(password)
+    async def run():
+        async with AsyncSessionLocal() as db:
+            admin = await create_admin(db, "duplicate@example.com", "Original Admin", "Original-admin-password-123!")
+            with pytest.raises(SystemExit, match="already exists"):
+                await create_admin(db, "duplicate@example.com", "Replacement Admin", "Replacement-password-123!")
+            assert verify_password("Original-admin-password-123!", admin.hashed_password)
+            assert admin.name == "Original Admin"
+    asyncio.run(run())
